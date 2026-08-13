@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22 et pnpm épinglé se tiennent : sans le pin, corepack installe le
+      # dernier pnpm publié et la construction dépend du jour.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Dépendances
+        run: pnpm install --frozen-lockfile
+
+      - name: Types
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test
+
+      - name: Compilation
+        run: pnpm build
+
+      # Prouve que le paquet démarre depuis sa sortie compilée et refuse une
+      # configuration absente — la panne la plus probable à l'installation.
+      - name: Démarrage sans configuration
+        run: |
+          if node dist/index.js 2>/dev/null; then
+            echo "Le serveur aurait dû refuser de démarrer sans SKYNODE_TOKEN"
+            exit 1
+          fi
