@@ -36,7 +36,8 @@ export function readConfig(env: NodeJS.ProcessEnv): Config {
   if (!token.startsWith(TOKEN_PREFIX)) {
     throw new Error(
       `SKYNODE_TOKEN ne ressemble pas à un jeton d'accès personnel : ceux-ci commencent ` +
-        `par « ${TOKEN_PREFIX} ». Un jeton de session de navigateur ne convient pas.`
+        `par « ${TOKEN_PREFIX} ». Un jeton de session de navigateur ne convient pas. ` +
+        `Créez un jeton dans votre espace client, sur /compte/securite.`
     )
   }
 

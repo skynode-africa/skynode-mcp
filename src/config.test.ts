@@ -28,6 +28,9 @@ describe("readConfig", () => {
     expect(() => readConfig({ SKYNODE_TOKEN: "eyJhbGciOiJIUzI1NiJ9.a.b" })).toThrow(
       /sky_/
     )
+    expect(() => readConfig({ SKYNODE_TOKEN: "eyJhbGciOiJIUzI1NiJ9.a.b" })).toThrow(
+      /compte\/securite/
+    )
   })
 
   it("accepte une URL d'API explicite", () => {
