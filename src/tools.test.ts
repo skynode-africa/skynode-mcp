@@ -1,3 +1,5 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { describe, expect, it, vi } from "vitest"
 
@@ -110,5 +112,50 @@ describe("registerTools", () => {
 
     expect(result.isError).toBe(true)
     expect(result.content[0].text).not.toContain("undefined is not a function")
+  })
+
+  /**
+   * `mount()` court-circuite `registerTool` : la validation Zod du SDK s'exécute avant
+   * d'atteindre le gestionnaire, donc aucun des tests ci-dessus ne l'exerce. Seul un
+   * aller-retour complet via un vrai transport le peut. Ce test le fait : serveur et
+   * client réels, reliés par `InMemoryTransport`, un appel `server_status` sans
+   * `server_id`.
+   *
+   * Ce que ce test prouve : le texte lisible par l'agent contient un message français
+   * qui dit quoi faire, et plus le message générique de Zod (« expected string,
+   * received undefined »). Ce qu'il ne prouve pas : que la réponse est *intégralement*
+   * en français — le préfixe `MCP error -32602: Input validation error: …` reste du
+   * SDK et reste en anglais, assumé (voir le commentaire au-dessus du schéma dans
+   * `tools.ts`).
+   */
+  it("refuse en français un server_id absent, via le vrai chemin d’appel du SDK", async () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" })
+    registerTools(server, { getInstance: vi.fn() } as Partial<SkyNodeApi> as SkyNodeApi)
+
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: "test-client", version: "0.0.0" })
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ])
+
+    try {
+      const result = (await client.callTool({
+        name: "server_status",
+        arguments: {},
+      })) as {
+        isError?: boolean
+        content: { text: string }[]
+      }
+
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toContain("obligatoire")
+      expect(result.content[0].text).toContain("list_servers")
+      expect(result.content[0].text).not.toContain("expected string")
+    } finally {
+      await client.close()
+      await server.close()
+    }
   })
 })

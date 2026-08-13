@@ -71,8 +71,22 @@ export function registerTools(server: McpServer, api: SkyNodeApi): void {
         "Détaille un serveur : état, adresses IP, système, région, utilisateur SSH, " +
         "échéance de facturation. L’identifiant s’obtient avec list_servers. Lecture seule.",
       inputSchema: {
+        /*
+          Cette validation s'exécute côté SDK, avant d'entrer dans le gestionnaire —
+          donc en dehors de `guard()`. Le message par défaut de Zod (« expected string,
+          received undefined ») serait renvoyé tel quel à l'agent, en anglais : `error`
+          le remplace par un message français qui dit quoi faire. `.describe()` reste
+          nécessaire à côté : il alimente le schéma JSON annoncé au client, `error` ne
+          sert qu'au message de refus.
+
+          Le préfixe `MCP error -32602: Input validation error: …` qui entoure ce
+          message reste, lui, en anglais : il vient du SDK et ne nous appartient pas.
+        */
         server_id: z
-          .string()
+          .string({
+            error:
+              "L’identifiant du serveur est obligatoire. Obtenez-le avec list_servers.",
+          })
           .describe("Identifiant du serveur, tel que rendu par list_servers"),
       },
     },
