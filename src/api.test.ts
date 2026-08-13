@@ -94,5 +94,23 @@ describe("SkyNodeApi", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(failure(403, "FORBIDDEN", "Forbidden")))
 
     await expect(new SkyNodeApi(config).listInstances()).rejects.toBeInstanceOf(SkyNodeError)
+    // La valeur, pas seulement le type : une régression qui renverrait toujours
+    // `status: 0` doit faire échouer ce test.
+    await expect(new SkyNodeApi(config).listInstances()).rejects.toMatchObject({ status: 403 })
+  })
+
+  /**
+   * Un proxy d'entreprise, un portail Wi-Fi captif ou une page d'erreur d'infrastructure
+   * répondent couramment 200 avec du HTML. Sans traduction, `response.json()` lèverait un
+   * `SyntaxError` brut — exactement la pile Node que ce module se donne pour mission
+   * d'éviter.
+   */
+  it("traduit un 200 au corps non-JSON en réponse de forme inattendue", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not json", { status: 200 })))
+
+    await expect(new SkyNodeApi(config).listInstances()).rejects.toBeInstanceOf(SkyNodeError)
+    await expect(new SkyNodeApi(config).listInstances()).rejects.toThrow(
+      /forme attendue|inattendu/i
+    )
   })
 })

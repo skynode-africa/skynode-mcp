@@ -98,7 +98,22 @@ export class SkyNodeApi {
       throw new SkyNodeError(response.status, explain(response.status))
     }
 
-    const body = (await response.json()) as Envelope<T>
+    let body: Envelope<T>
+
+    try {
+      body = (await response.json()) as Envelope<T>
+    } catch (error: unknown) {
+      // Un proxy d'entreprise, un portail Wi-Fi captif ou une page d'erreur
+      // d'infrastructure répondent couramment 200 avec du HTML : la requête a abouti,
+      // mais pas au bon endroit. Réessayer à l'identique ne changera rien — ce n'est
+      // pas une panne temporaire du service.
+      throw new SkyNodeError(
+        response.status,
+        "La réponse de l’API SkyNode n’a pas la forme attendue (JSON). " +
+          "Un intermédiaire réseau (proxy, portail captif) a probablement répondu à sa " +
+          `place. Détail : ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
 
     return body.data
   }
