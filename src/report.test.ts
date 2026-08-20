@@ -175,6 +175,31 @@ describe("formatServerReport", () => {
     expect(rapport).toContain("caddy")
     expect(rapport).not.toContain("bridge")
     expect(rapport).not.toContain("cron.service")
+    // Un seul conteneur : l'accord ne doit pas rester au pluriel par défaut, comme
+    // `formatInstanceList` le fait déjà pour « 1 serveur : » (src/format.ts).
+    expect(rapport).toContain("1 conteneur :")
+    expect(rapport).not.toContain("1 conteneurs")
+  })
+
+  /**
+   * `skynode` est exécutable, mais ne veut pas dire « prêt à un premier déploiement » :
+   * la machine est déjà gérée, et une accroche partagée avec `vierge`/`docker`
+   * inciterait l'agent à la repréparer à froid.
+   */
+  it("distingue l'accroche du régime skynode d'un premier déploiement possible", () => {
+    const rapport = formatServerReport(
+      instance(),
+      serverFacts({ skynode: { present: true, raw: "{}" } }),
+      classification({
+        regime: "skynode",
+        executable: true,
+        because: "Un état SkyNode existe déjà sur cette machine : elle est déjà gérée.",
+      })
+    )
+
+    expect(rapport.split("\n")[0]).toMatch(/skynode/i)
+    expect(rapport.split("\n")[0]).toMatch(/déjà gérée/i)
+    expect(rapport.split("\n")[0]).not.toMatch(/déploiement est possible/i)
   })
 
   it("nomme le service qui tient le port 80", () => {

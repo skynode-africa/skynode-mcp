@@ -162,7 +162,17 @@ export function formatServerReport(
   return lines.join("\n")
 }
 
+/**
+ * `skynode` est exécutable au même titre que `vierge`/`docker` (§ `regime.ts`), mais
+ * dit l'inverse d'une machine à préparer : elle est déjà gérée. La confondre avec
+ * « prête pour un premier déploiement » sur la ligne que l'agent lit en priorité
+ * l'inciterait à repréparer à froid une machine qui n'en a pas besoin.
+ */
 function serverHeadline(classification: Classification): string {
+  if (classification.regime === "skynode") {
+    return `Régime ${classification.regime} : cette machine est déjà gérée par SkyNode.`
+  }
+
   const outcome = classification.executable
     ? "le déploiement est possible"
     : "SkyNode ne déploiera pas ici sans y être invité"
@@ -180,10 +190,6 @@ function serverDetailLines(instance: Instance, facts: ServerFacts): string[] {
     `Ressources : ${facts.resources.cpu} vCPU, ${facts.resources.memoryMb} Mio RAM, ` +
       `swap ${facts.resources.swapMb} Mio, disque à ${facts.resources.diskUsePercent} %`
   )
-
-  if (facts.binaries.length > 0) {
-    lines.push(`Outils présents : ${facts.binaries.join(", ")}`)
-  }
 
   if (facts.docker.present) {
     lines.push(...dockerLines(facts.docker))
@@ -208,8 +214,10 @@ function dockerLines(docker: ServerFacts["docker"]): string[] {
 
   const shown = docker.containers.slice(0, MAX_CONTAINERS)
   const rest = docker.containers.length - shown.length
+  const total = docker.containers.length
+  const heading = total === 1 ? "1 conteneur :" : `${total} conteneurs :`
 
-  lines.push(`${docker.containers.length} conteneurs :`)
+  lines.push(heading)
   lines.push(...shown.map((c) => `- ${c.name} (${c.image}) — ${c.state}`))
 
   if (rest > 0) {
