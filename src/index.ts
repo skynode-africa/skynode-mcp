@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { SkyNodeApi } from "./api.js"
 import { readConfig } from "./config.js"
+import { systemSsh } from "./ssh.js"
 import { registerTools } from "./tools.js"
 
 /**
@@ -18,7 +19,7 @@ async function main(): Promise<void> {
   const config = readConfig(process.env)
   const server = new McpServer({ name: "skynode", version: "0.1.0" })
 
-  registerTools(server, new SkyNodeApi(config))
+  registerTools(server, new SkyNodeApi(config), systemSsh())
 
   await server.connect(new StdioServerTransport())
 }
