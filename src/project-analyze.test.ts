@@ -167,4 +167,48 @@ describe("analyzeProject", () => {
     expect(facts.runtime.family).toBe("node")
     expect(facts.warnings.join(" ")).toMatch(/package\.json/)
   })
+
+  /**
+   * Relecture, constat 1 : une recherche de sous-chaîne sur le .gitignore brut se
+   * laissait tromper par un commentaire qui *mentionne* ".env" sans le couvrir — la
+   * conclusion « couvert » était rendue avec la même confiance qu'une vraie.
+   */
+  it("n'est pas trompé par un .gitignore qui ne mentionne .env que dans un commentaire", () => {
+    const facts = analyzeProject(
+      snapshot({
+        markers: ["package.json", ".gitignore"],
+        contents: {
+          "package.json": "{}",
+          ".gitignore": "# voir .env.example pour le modèle\nnode_modules\n",
+        },
+        envKeys: { ".env.production": ["DATABASE_URL"] },
+      })
+    )
+
+    expect(facts.env.hasLocalSecrets).toBe(true)
+    expect(facts.warnings.join(" ")).toMatch(/\.env\.production/)
+  })
+
+  /**
+   * Relecture, constat 2 : un projet à sortie statique (script build sans start) n'a
+   * aucun port applicatif, quel que soit le framework qui l'a produit — lui prêter un
+   * défaut serait présenter une supposition comme un fait.
+   */
+  it("ne prête aucun port par défaut à une sortie statique", () => {
+    const facts = analyzeProject(
+      snapshot({
+        markers: ["package.json"],
+        contents: {
+          "package.json": JSON.stringify({
+            scripts: { build: "vite build" },
+            dependencies: { vite: "5.4.0" },
+          }),
+        },
+      })
+    )
+
+    expect(facts.output.mode).toBe("static")
+    expect(facts.port.value).toBeNull()
+    expect(facts.port.source).toMatch(/statique/i)
+  })
 })

@@ -87,7 +87,7 @@ export function analyzeProject(snapshot: ProjectSnapshot): ProjectFacts {
   const runtime = detectRuntime(snapshot, pkg, warnings)
   const framework = detectFramework(pkg, snapshot.contents["requirements.txt"])
   const output = detectOutput(snapshot, pkg, runtime.family)
-  const port = detectPort(snapshot, declared.dockerfiles, framework, runtime.family)
+  const port = detectPort(snapshot, declared.dockerfiles, framework, runtime.family, output.mode)
   const data = detectData(pkg, snapshot)
   const env = detectEnv(snapshot, warnings)
   const monorepo = detectMonorepo(snapshot.markers, warnings)
@@ -289,17 +289,31 @@ function detectOutput(
  * l'application du principe général « déclaré avant déduit ». Sans aucun des deux, le
  * port reste `null` : deviner 80 romprait la promesse faite au développeur de ne
  * jamais fabriquer une donnée qu'il n'a pas fournie.
+ *
+ * Une sortie statique n'écoute sur aucun port applicatif en production, quel que soit
+ * le framework qui l'a produite : lui prêter un défaut serait présenter une supposition
+ * comme un fait, ce que la spec interdit même quand la règle du port ne le redit pas
+ * explicitement. Un Dockerfile déclaré reste prioritaire — un choix exprimé par le
+ * développeur n'est jamais contredit.
  */
 function detectPort(
   snapshot: ProjectSnapshot,
   dockerfiles: string[],
   framework: string | null,
-  family: RuntimeFamily
+  family: RuntimeFamily,
+  outputMode: OutputMode
 ): ProjectFacts["port"] {
   for (const dockerfile of dockerfiles) {
     const expose = snapshot.dockerfileHints[dockerfile]?.expose[0]
     if (expose !== undefined) {
       return { value: expose, source: "EXPOSE dans Dockerfile" }
+    }
+  }
+
+  if (outputMode === "static") {
+    return {
+      value: null,
+      source: "site statique : servi comme des fichiers, sans port applicatif",
     }
   }
 
@@ -361,10 +375,10 @@ function detectEnv(snapshot: ProjectSnapshot, warnings: string[]): ProjectFacts[
   const realFiles = files.filter((file) => !/example|sample|template/i.test(file))
 
   const gitignore = snapshot.contents[".gitignore"]
-  const coveredByGitignore = gitignore !== undefined && /\.env/.test(gitignore)
+  const gitignorePatterns = parseGitignorePatterns(gitignore)
 
-  if (realFiles.length > 0 && !coveredByGitignore) {
-    for (const file of realFiles) {
+  for (const file of realFiles) {
+    if (!isCoveredByGitignore(file, gitignorePatterns)) {
       warnings.push(
         `« ${file} » contient des valeurs d'environnement réelles et n'est pas couvert par ` +
           "le .gitignore : vérifiez qu'il ne sera jamais committé."
@@ -373,6 +387,33 @@ function detectEnv(snapshot: ProjectSnapshot, warnings: string[]): ProjectFacts[
   }
 
   return { keys, files, hasLocalSecrets: realFiles.length > 0 }
+}
+
+/**
+ * Une ligne vide ou un commentaire (`#`) ne désigne aucun fichier : une recherche de
+ * sous-chaîne sur le fichier brut se laisserait tromper par un `.gitignore` qui se
+ * contente de *mentionner* `.env` dans un commentaire, et déclarerait couvert un secret
+ * qui ne l'est pas — la conclusion la plus dangereuse que ce module puisse rendre.
+ */
+function parseGitignorePatterns(gitignore: string | undefined): string[] {
+  if (gitignore === undefined) return []
+
+  return gitignore
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+}
+
+/**
+ * Pas une implémentation complète de la syntaxe `.gitignore` (pas de répertoires, pas de
+ * négation, pas de `**`) : juste assez pour reconnaître qu'un motif comme `.env`,
+ * `.env*`, `*.env` ou `.env.production` désigne le fichier donné.
+ */
+function isCoveredByGitignore(file: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => {
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
+    return new RegExp(`^${escaped}$`).test(file)
+  })
 }
 
 /**
