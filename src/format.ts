@@ -10,7 +10,7 @@ import type { Instance } from "./api.js"
  */
 
 /** Ce que chaque état signifie pour la suite des opérations. */
-const STATUS_LABELS: Record<string, string> = {
+export const STATUS_LABELS: Record<string, string> = {
   PENDING_PAYMENT: "en attente de paiement — le serveur sera créé une fois le paiement confirmé",
   PROVISIONING: "en cours de livraison — il sera prêt sans intervention, en quelques minutes",
   PROVISIONING_FAILED: "échec de livraison — le support SkyNode a été alerté",
