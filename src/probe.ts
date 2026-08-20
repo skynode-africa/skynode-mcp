@@ -140,7 +140,7 @@ export interface ServerFacts {
   }
   podmanPresent: boolean
   binaries: string[]
-  listeners: { address: string; port: number; process: string | null }[]
+  listeners: Listener[]
   services: string[]
   panel: { id: string; path: string } | null
   skynode: {
@@ -180,21 +180,70 @@ function parseContainer(line: string): { name: string; image: string; state: str
   }
 }
 
-/**
- * `ss -lntpH` : "LISTEN <recv-q> <send-q> <adresse:port> <peer> [users:...]". L'adresse
- * et le port sont séparés par le dernier `:`, un IPv6 en contenant plusieurs.
- */
-function parseListener(line: string): { address: string; port: number; process: string | null } {
-  const fields = line.split(/\s+/).filter((f) => f.length > 0)
-  const local = fields[3] ?? ""
+type Listener = { address: string; port: number; process: string | null }
 
+/**
+ * `ss` s'entoure de crochets pour une adresse IPv6 (`[::]:80`), `netstat` ne le fait pas
+ * (`:::80`) : sans normalisation, la même machine écouterait « différemment » selon
+ * l'outil qui a répondu, et la tâche 4 compare l'adresse à une liste fixe.
+ */
+function stripBrackets(address: string): string {
+  return address.replace(/^\[/, "").replace(/\]$/, "")
+}
+
+/**
+ * L'adresse et le port occupent la même colonne (locale) dans `ss` et dans `netstat`,
+ * séparés par le dernier `:` — un IPv6 en contient plusieurs.
+ */
+function addressAndPort(local: string): { address: string; port: number } {
   const lastColon = local.lastIndexOf(":")
   const address = lastColon === -1 ? local : local.slice(0, lastColon)
   const port = lastColon === -1 ? 0 : toInt(local.slice(lastColon + 1))
 
-  const processMatch = /users:\(\("([^"]+)"/.exec(line)
+  return { address: stripBrackets(address), port }
+}
 
-  return { address, port, process: processMatch?.[1] ?? null }
+/**
+ * Les deux outils de repli produisent des formats disjoints, et le script peut avoir
+ * utilisé l'un ou l'autre selon ce qui était installé sur la machine sondée :
+ *
+ * - `ss -lntpH` (sans en-tête) : "LISTEN <recv-q> <send-q> <local> <peer> [users:...]" —
+ *   le nom de processus se lit dans `users:(("nom",`.
+ * - `netstat -lntp` (avec deux lignes d'en-tête à écarter) :
+ *   "tcp[6] <recv-q> <send-q> <local> <peer> LISTEN <pid>/<nom>".
+ *
+ * Une ligne qui ne correspond à aucun des deux formats — en-tête, ligne tronquée par une
+ * connexion coupée en cours de lecture — est écartée plutôt que transformée en écouteur
+ * fantôme sur le port 0.
+ */
+function parseListener(line: string): Listener | null {
+  const fields = line.split(/\s+/).filter((f) => f.length > 0)
+
+  if (fields[0] === "LISTEN") {
+    const local = fields[3]
+    if (!local) return null
+
+    const processMatch = /users:\(\("([^"]+)"/.exec(line)
+
+    return { ...addressAndPort(local), process: processMatch?.[1] ?? null }
+  }
+
+  if (fields[0] === "tcp" || fields[0] === "tcp6") {
+    if (fields[5] !== "LISTEN") return null
+
+    const local = fields[3]
+    if (!local) return null
+
+    const pidProgram = fields[6]
+    const slash = pidProgram?.indexOf("/") ?? -1
+    const process = pidProgram && pidProgram !== "-" && slash !== -1 ? pidProgram.slice(slash + 1) : null
+
+    return { ...addressAndPort(local), process }
+  }
+
+  // Ni "LISTEN" en tête (ss) ni "tcp"/"tcp6" (netstat) : bannière, ligne d'en-tête de
+  // `netstat`, ou ligne coupée — dans tous les cas, pas un écouteur.
+  return null
 }
 
 /** "id chemin" — un seul espace sépare les deux, produit par la boucle du script. */
@@ -206,18 +255,22 @@ function parsePanel(line: string): { id: string; path: string } {
   return { id: line.slice(0, spaceIndex), path: line.slice(spaceIndex + 1) }
 }
 
-/** Base64 standard, avec ou sans le remplissage `=` que `-w0` omet parfois selon la libc. */
+// Base64 standard : le nombre de `=` de remplissage (0, 1 ou 2) dépend du reste de la
+// division de la longueur des octets d'origine par 3, d'où l'intervalle `{0,2}`.
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/
 
 /**
  * Décodage best-effort : un état corrompu ne doit pas faire perdre tout le constat.
  *
  * `Buffer.from(..., "base64")` ne lève jamais — il ignore silencieusement les octets
- * hors alphabet — d'où la validation du format en amont, seul moyen de distinguer un
- * état illisible d'un état vide.
+ * hors alphabet et complète les groupes incomplets — d'où deux vérifications en amont
+ * qu'il ne fait pas lui-même : la forme (alphabet, remplissage) et la longueur, seul
+ * moyen de distinguer un état tronqué d'un état bien formé, et une chaîne vide (les deux
+ * tentatives du script ont échoué) d'un état vide.
  */
 function decodeSkynodeState(b64: string | undefined): string | null {
-  if (b64 === undefined || !BASE64_PATTERN.test(b64)) return null
+  if (b64 === undefined || b64.length === 0) return null
+  if (b64.length % 4 !== 0 || !BASE64_PATTERN.test(b64)) return null
 
   const decoded = Buffer.from(b64, "base64").toString("utf8")
 
@@ -229,7 +282,10 @@ function decodeSkynodeState(b64: string | undefined): string | null {
 }
 
 export function parseProbe(rawOutput: string): ServerFacts {
-  const lines = rawOutput.split("\n")
+  // `-T` verrouille des retours à la ligne LF côté SSH (tâche 5), mais rien ici ne doit
+  // en dépendre : un `\r` résiduel contaminerait silencieusement chaque comparaison de
+  // valeur ("root\r" n'est ni "root", ni "sudo", ni "aucun") sans faire échouer l'analyse.
+  const lines = rawOutput.split("\n").map((l) => l.replace(/\r$/, ""))
 
   const headerIndex = lines.findIndex((l) => l.startsWith("probe.version\t"))
 
@@ -299,7 +355,9 @@ export function parseProbe(rawOutput: string): ServerFacts {
     },
     podmanPresent: isOui(single.get("podman.present")),
     binaries: repeated.get("bin") ?? [],
-    listeners: (repeated.get("listen") ?? []).map(parseListener),
+    listeners: (repeated.get("listen") ?? [])
+      .map(parseListener)
+      .filter((l): l is Listener => l !== null),
     services: repeated.get("service") ?? [],
     // Plusieurs répertoires de panneaux sur une même machine sont improbables ; en cas de
     // coexistence, le premier détecté suit l'ordre du script, des panneaux les plus

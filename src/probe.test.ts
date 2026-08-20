@@ -150,10 +150,73 @@ describe("parseProbe", () => {
     ])
   })
 
+  /**
+   * Sur une machine sans `ss`, le script bascule sur `netstat -lntp`, dont la sortie
+   * s'ouvre sur deux lignes d'en-tête : sans filtre, elles deviendraient des écouteurs
+   * fantômes. Le nom de processus s'y lit "<pid>/<nom>", pas "users:((...".
+   */
+  it("filtre les en-têtes de netstat et lit son format pid/nom", () => {
+    const facts = parseProbe(
+      raw(
+        ["listen", "Active Internet connections (only servers)"],
+        ["listen", "Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name"],
+        ["listen", "tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      812/sshd"]
+      )
+    )
+
+    expect(facts.listeners).toEqual([{ address: "0.0.0.0", port: 22, process: "sshd" }])
+  })
+
+  /**
+   * `ss` entoure une adresse IPv6 de crochets (`[::]:80`), `netstat` ne le fait pas
+   * (`:::80`) : sans normalisation, la même machine écouterait « différemment » selon
+   * l'outil qui a répondu, et la classification compare l'adresse à une liste fixe.
+   */
+  it("normalise l'adresse IPv6 identiquement entre ss et netstat", () => {
+    const facts = parseProbe(
+      raw(
+        ["listen", "LISTEN 0 128 [::]:80 [::]:*"],
+        ["listen", "tcp6       0      0 :::80                   :::*                    LISTEN      -"]
+      )
+    )
+
+    expect(facts.listeners).toEqual([
+      { address: "::", port: 80, process: null },
+      { address: "::", port: 80, process: null },
+    ])
+  })
+
+  /**
+   * Une ligne tronquée par une connexion coupée en cours de lecture ne doit pas devenir
+   * un écouteur fantôme sur l'adresse vide et le port 0.
+   */
+  it("écarte les lignes de listen tronquées plutôt que d'inventer un écouteur", () => {
+    const facts = parseProbe(raw(["listen", "LISTEN 0"], ["listen", ""]))
+
+    expect(facts.listeners).toEqual([])
+  })
+
   it("relève un panneau de contrôle", () => {
     const facts = parseProbe(raw(["panel", "aapanel /www/server/panel"]))
 
     expect(facts.panel).toEqual({ id: "aapanel", path: "/www/server/panel" })
+  })
+
+  /**
+   * Le contrat « premier détecté l'emporte » vit dans l'ordre du `for` du script, pas
+   * dans `parseProbe` : rien ne garde cet ordre, et un réordonnancement innocent de la
+   * boucle le casserait sans faire échouer un seul test si celui-ci manquait.
+   */
+  it("retient le premier panneau détecté quand plusieurs coexistent", () => {
+    const factsPlesk = parseProbe(
+      raw(["panel", "plesk /usr/local/psa"], ["panel", "plesk /opt/psa"])
+    )
+    expect(factsPlesk.panel).toEqual({ id: "plesk", path: "/usr/local/psa" })
+
+    const factsMix = parseProbe(
+      raw(["panel", "aapanel /www/server/panel"], ["panel", "webmin /etc/webmin"])
+    )
+    expect(factsMix.panel).toEqual({ id: "aapanel", path: "/www/server/panel" })
   })
 
   it("décode l'état SkyNode", () => {
@@ -175,6 +238,50 @@ describe("parseProbe", () => {
 
     expect(facts.skynode.present).toBe(true)
     expect(facts.skynode.raw).toBeNull()
+  })
+
+  /**
+   * Une connexion coupée en cours de lecture du fichier d'état tronque le base64 sans
+   * casser son alphabet : un décodage qui ne vérifie que les caractères rendrait alors
+   * du JSON amputé, pris pour l'état réel.
+   */
+  it("rend null un état SkyNode tronqué plutôt qu'un JSON partiel", () => {
+    const truncated = Buffer.from(JSON.stringify({ app: "boutique" }))
+      .toString("base64")
+      .slice(0, 15)
+    const facts = parseProbe(
+      raw(["skynode.present", "oui"], ["skynode.state_b64", truncated])
+    )
+
+    expect(facts.skynode.raw).toBeNull()
+  })
+
+  /**
+   * Si les deux tentatives de `base64` du script échouent, la substitution de commande
+   * rend une chaîne vide : indiscernable d'un fichier d'état vide si elle passait pour
+   * du base64 valide, et `JSON.parse("")` lèverait chez l'appelant.
+   */
+  it("rend null un état SkyNode vide plutôt qu'une chaîne vide", () => {
+    const facts = parseProbe(raw(["skynode.present", "oui"], ["skynode.state_b64", ""]))
+
+    expect(facts.skynode.raw).toBeNull()
+  })
+
+  /**
+   * `-T` verrouille des fins de ligne LF côté SSH (tâche 5), mais rien ici ne doit en
+   * dépendre : un `\r` résiduel contamine chaque comparaison de valeur sans faire
+   * échouer l'analyse — la pire panne, silencieuse.
+   */
+  it("ignore les retours chariot (CRLF) sans corrompre les valeurs", () => {
+    const facts = parseProbe(
+      raw(["docker.present", "oui"], ["access.elevate", "root"], ["cpu.count", "4"])
+        .split("\n")
+        .join("\r\n")
+    )
+
+    expect(facts.docker.present).toBe(true)
+    expect(facts.access.elevate).toBe("root")
+    expect(facts.resources.cpu).toBe(4)
   })
 
   it("applique des valeurs par défaut sûres aux clés absentes", () => {
