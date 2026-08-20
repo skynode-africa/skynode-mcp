@@ -196,6 +196,37 @@ describe("parseProbe", () => {
     expect(facts.listeners).toEqual([])
   })
 
+  /**
+   * `toInt()` transforme silencieusement tout non-numérique en 0 : sans validation
+   * dédiée dans `parseListener`, un port illisible ou hors bornes fabriquerait un
+   * écouteur sur le port 0, exactement le défaut qu'écarter les lignes tronquées visait
+   * déjà à éviter.
+   */
+  it("écarte un port non numérique ou hors bornes plutôt que de le ramener à 0", () => {
+    const facts = parseProbe(
+      raw(
+        ["listen", "LISTEN 0 128 0.0.0.0:abc 0.0.0.0:*"],
+        ["listen", "LISTEN 0 128 0.0.0.0:0 0.0.0.0:*"],
+        ["listen", "LISTEN 0 128 0.0.0.0:70000 0.0.0.0:*"]
+      )
+    )
+
+    expect(facts.listeners).toEqual([])
+  })
+
+  /**
+   * `netstat` sépare toujours pid et nom par un seul `/`, mais le nom peut lui-même
+   * contenir un espace — "nginx: master" est la forme la plus courante qui soit sur le
+   * port 80. Le découper au premier jeton après `/` tronquerait le nom à "nginx:".
+   */
+  it("garde le nom de processus netstat en entier, espaces compris", () => {
+    const facts = parseProbe(
+      raw(["listen", "tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN      812/nginx: master"])
+    )
+
+    expect(facts.listeners).toEqual([{ address: "0.0.0.0", port: 80, process: "nginx: master" }])
+  })
+
   it("relève un panneau de contrôle", () => {
     const facts = parseProbe(raw(["panel", "aapanel /www/server/panel"]))
 

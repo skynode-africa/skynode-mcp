@@ -192,15 +192,33 @@ function stripBrackets(address: string): string {
 }
 
 /**
- * L'adresse et le port occupent la même colonne (locale) dans `ss` et dans `netstat`,
- * séparés par le dernier `:` — un IPv6 en contient plusieurs.
+ * Un port qui n'est pas un entier de 1 à 65535 n'est pas un port : `null` fait écarter
+ * la ligne entière, comme une colonne absente. Distinct de `toInt()`, qui rend `0` par
+ * défaut pour des champs numériques où `0` est une valeur sûre (`cpu.count`…) — ici,
+ * `0` serait un écouteur fabriqué de toutes pièces, pas une valeur par défaut.
  */
-function addressAndPort(local: string): { address: string; port: number } {
-  const lastColon = local.lastIndexOf(":")
-  const address = lastColon === -1 ? local : local.slice(0, lastColon)
-  const port = lastColon === -1 ? 0 : toInt(local.slice(lastColon + 1))
+function parsePort(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null
 
-  return { address: stripBrackets(address), port }
+  const n = Number.parseInt(raw, 10)
+
+  return n >= 1 && n <= 65535 ? n : null
+}
+
+/**
+ * L'adresse et le port occupent la même colonne (locale) dans `ss` et dans `netstat`,
+ * séparés par le dernier `:` — un IPv6 en contient plusieurs. `null` si la colonne n'a
+ * pas de `:` ou si ce qui suit n'est pas un port valide : dans les deux cas, ce n'est
+ * pas un écouteur exploitable.
+ */
+function addressAndPort(local: string): { address: string; port: number } | null {
+  const lastColon = local.lastIndexOf(":")
+  if (lastColon === -1) return null
+
+  const port = parsePort(local.slice(lastColon + 1))
+  if (port === null) return null
+
+  return { address: stripBrackets(local.slice(0, lastColon)), port }
 }
 
 /**
@@ -210,11 +228,13 @@ function addressAndPort(local: string): { address: string; port: number } {
  * - `ss -lntpH` (sans en-tête) : "LISTEN <recv-q> <send-q> <local> <peer> [users:...]" —
  *   le nom de processus se lit dans `users:(("nom",`.
  * - `netstat -lntp` (avec deux lignes d'en-tête à écarter) :
- *   "tcp[6] <recv-q> <send-q> <local> <peer> LISTEN <pid>/<nom>".
+ *   "tcp[6] <recv-q> <send-q> <local> <peer> LISTEN <pid>/<nom>", le nom pouvant lui-même
+ *   contenir des espaces (`812/nginx: master`) — on garde tout ce qui suit le premier
+ *   `/`, espaces compris, plutôt que de couper au premier jeton et tronquer "nginx:".
  *
  * Une ligne qui ne correspond à aucun des deux formats — en-tête, ligne tronquée par une
- * connexion coupée en cours de lecture — est écartée plutôt que transformée en écouteur
- * fantôme sur le port 0.
+ * connexion coupée en cours de lecture, port absent ou hors bornes — est écartée plutôt
+ * que transformée en écouteur fantôme sur le port 0.
  */
 function parseListener(line: string): Listener | null {
   const fields = line.split(/\s+/).filter((f) => f.length > 0)
@@ -223,9 +243,12 @@ function parseListener(line: string): Listener | null {
     const local = fields[3]
     if (!local) return null
 
+    const parsed = addressAndPort(local)
+    if (!parsed) return null
+
     const processMatch = /users:\(\("([^"]+)"/.exec(line)
 
-    return { ...addressAndPort(local), process: processMatch?.[1] ?? null }
+    return { ...parsed, process: processMatch?.[1] ?? null }
   }
 
   if (fields[0] === "tcp" || fields[0] === "tcp6") {
@@ -234,11 +257,14 @@ function parseListener(line: string): Listener | null {
     const local = fields[3]
     if (!local) return null
 
-    const pidProgram = fields[6]
-    const slash = pidProgram?.indexOf("/") ?? -1
-    const process = pidProgram && pidProgram !== "-" && slash !== -1 ? pidProgram.slice(slash + 1) : null
+    const parsed = addressAndPort(local)
+    if (!parsed) return null
 
-    return { ...addressAndPort(local), process }
+    const pidProgram = fields.slice(6).join(" ")
+    const slash = pidProgram.indexOf("/")
+    const process = slash === -1 || pidProgram === "-" ? null : pidProgram.slice(slash + 1)
+
+    return { ...parsed, process }
   }
 
   // Ni "LISTEN" en tête (ss) ni "tcp"/"tcp6" (netstat) : bannière, ligne d'en-tête de
