@@ -42,6 +42,7 @@ Dans la configuration MCP de votre client :
 | `server_status` | Détaille un serveur : état, IP, système, région, échéance |
 | `inspect_project` | Constate un projet local : Dockerfile, runtime, framework, port, clés d'environnement |
 | `inspect_server` | Constate un serveur par SSH : système, Docker, ports, régime, marche à suivre |
+| `plan_deployment` | Propose un plan de déploiement détaillé, à lire avant toute action. N'exécute rien |
 
 ## Variables d'environnement
 
@@ -53,6 +54,26 @@ Dans la configuration MCP de votre client :
 Le jeton se déclare **par variable d'environnement, jamais en argument de ligne de
 commande** : les arguments d'un processus sont lisibles par tout utilisateur de la
 machine.
+
+## Ce que le plan n'est pas
+
+`plan_deployment` constate votre projet et votre serveur, puis **propose** — il n'applique
+rien.
+
+- **Un plan n'exécute rien.** Cette version du paquet sait constater et proposer ;
+  l'exécution arrive au jalon suivant. Rien de ce que rend `plan_deployment` ne touche à
+  votre serveur.
+- **Un plan est une donnée, pas un script.** Le vocabulaire des étapes est fermé et
+  versionné avec le paquet : votre agent choisit lesquelles, dans quel ordre et avec
+  quelles valeurs, mais ne peut pas en inventer une. C'est ce qui borne ce qu'une
+  instruction malveillante trouvée dans un dépôt peut provoquer — au pire un plan
+  légitime et mauvais, que vous lisez avant d'approuver.
+- **Le `Dockerfile` généré vient d'un gabarit éprouvé**, pas d'une improvisation. Votre
+  agent en fixe les paramètres — version du runtime, gestionnaire de paquets, port — mais
+  la construction en plusieurs étapes, l'utilisateur non-root et le cache des dépendances
+  sont les mêmes pour tous les clients, donc corrigés une fois pour tous.
+- **Le plan vous est rendu en français**, étape par étape, jamais sous forme de données à
+  déchiffrer. C'est ce texte-là que vous approuverez.
 
 ## Prérequis SSH
 
