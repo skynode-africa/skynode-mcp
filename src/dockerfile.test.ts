@@ -185,6 +185,23 @@ describe("port effectif à l'exécution, pas seulement documentatif (C1)", () =>
     expect(df).toContain("EXPOSE 8080")
     expect(df).toMatch(/listen 8080;/)
   })
+
+  /**
+   * Le seul des cinq gabarits qui reste à la merci du code du client : `npm start` lance
+   * le serveur applicatif, dont la convention Node dominante est `process.env.PORT`. Sans
+   * cette variable, une application qui la suit garde son défaut codé en dur (souvent
+   * 3000) pendant qu'on annonce un autre port — même mode d'échec que C1, sur le seul
+   * gabarit qui y avait échappé.
+   */
+  it("node/serveur : le port choisi devient la variable que l'application lit", () => {
+    const df = generateDockerfile({
+      famille: "node", sortie: "server", version: "22",
+      gestionnaire: "pnpm", port: 8080, repertoire: null,
+    })
+
+    expect(df).toContain("EXPOSE 8080")
+    expect(df).toContain("ENV PORT=8080")
+  })
 })
 
 describe("généré Dockerignore : fuite de secrets imbriqués (C2)", () => {

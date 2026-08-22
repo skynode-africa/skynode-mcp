@@ -246,6 +246,13 @@ function nodeServerOrStandalone(params: DockerfileParams): string {
     "COPY --from=builder /app/prisma ./prisma",
     "COPY --from=builder /app/static ./static",
     "COPY --from=builder /app/templates ./templates",
+    // La convention Node dominante est `process.env.PORT` : une application qui la suit
+    // écoute sur son défaut codé en dur (3000, le plus souvent) tant que rien ne fixe
+    // cette variable, quel que soit le port annoncé par `EXPOSE`. Le conteneur reste
+    // alors `Up` et ne répond jamais — le même mode d'échec que C1, sur le seul gabarit
+    // qui y avait échappé. Le coût si l'application l'ignore est nul (une variable sans
+    // effet) ; le coût de l'omettre est un déploiement silencieusement mort.
+    `ENV PORT=${params.port}`,
     "USER skynode",
     `EXPOSE ${params.port}`,
     'CMD ["npm", "start"]',
