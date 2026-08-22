@@ -34,6 +34,9 @@ jobs:
       - name: Compilation
         run: pnpm build
 
+      - name: La sonde est du sh valide
+        run: node -e "import('./dist/probe.js').then(m => process.stdout.write(m.PROBE_SCRIPT))" | sh -n
+
       # Prouve que le paquet démarre depuis sa sortie compilée et refuse une
       # configuration absente — la panne la plus probable à l'installation.
       - name: Démarrage sans configuration

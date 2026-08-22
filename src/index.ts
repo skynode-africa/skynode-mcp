@@ -17,7 +17,7 @@ import { registerTools } from "./tools.js"
  */
 async function main(): Promise<void> {
   const config = readConfig(process.env)
-  const server = new McpServer({ name: "skynode", version: "0.1.0" })
+  const server = new McpServer({ name: "skynode", version: "0.2.0" })
 
   registerTools(server, new SkyNodeApi(config), systemSsh())
 
