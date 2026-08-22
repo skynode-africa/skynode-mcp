@@ -62,6 +62,8 @@ describe("computeFingerprint", () => {
       () => facts({ skynode: { present: true, raw: "{}" } })],
     ["la présence d'un panneau", undefined,
       () => facts({ panel: { id: "aapanel", path: "/www/server/panel" } })],
+    ["l'apparition de nginx", undefined, () => facts({ binaries: ["nginx"] })],
+    ["l'apparition d'apache2", undefined, () => facts({ binaries: ["apache2"] })],
   ])("change quand %s change", (_nom, autreClass, autreFacts) => {
     const base = computeFingerprint(facts(), classification())
     const modifie = computeFingerprint(
@@ -85,6 +87,8 @@ describe("computeFingerprint", () => {
     ["la liste des services", () => facts({ services: ["ssh.service", "cron.service"] })],
     ["les réseaux Docker", () => facts({ docker: { present: false, usable: false, version: "",
                                                    compose: false, containers: [], networks: ["bridge"] } })],
+    ["des binaires hors des quatre retenus",
+      () => facts({ binaries: ["git", "tar", "certbot", "rsync"] })],
   ])("ne change pas quand %s change", (_nom, autreFacts) => {
     expect(computeFingerprint(autreFacts(), classification()))
       .toBe(computeFingerprint(facts(), classification()))
@@ -132,5 +136,26 @@ describe("computeFingerprint", () => {
     const avec8080 = facts({ listeners: [{ address: "0.0.0.0", port: 8080, process: "app" }] })
 
     expect(computeFingerprint(avec8080, classification())).toBe(computeFingerprint(facts(), classification()))
+  })
+
+  /** Pendant du test d'ordre sur les écoutes : garde le tri appliqué à `binaires`. */
+  it("ne dépend pas de l'ordre des binaires", () => {
+    const ordre1 = facts({ binaries: ["nginx", "caddy"] })
+    const ordre2 = facts({ binaries: ["caddy", "nginx"] })
+
+    expect(computeFingerprint(ordre1, classification())).toBe(computeFingerprint(ordre2, classification()))
+  })
+
+  /**
+   * La sérialisation passe par un tableau JSON, jamais par une concaténation : sans quoi
+   * `["nginxcaddy"]` et `["nginx", "caddy"]` produiraient la même chaîne à hacher.
+   */
+  it("ne confond pas une liste de binaires avec leur concaténation", () => {
+    const concatene = facts({ binaries: ["nginxcaddy"] })
+    const distincts = facts({ binaries: ["nginx", "caddy"] })
+
+    expect(computeFingerprint(concatene, classification())).not.toBe(
+      computeFingerprint(distincts, classification())
+    )
   })
 })
