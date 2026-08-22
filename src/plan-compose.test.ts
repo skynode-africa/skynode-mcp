@@ -365,4 +365,78 @@ describe("composePlan", () => {
     expect(result.plan.resume).toMatch(/boutique\.exemple\.ci/)
     expect(result.plan.resume.length).toBeLessThan(500)
   })
+
+  /**
+   * Ajoutés en relecture : la seule branche du module qu'aucun des 18 tests du brief
+   * n'exerçait. `generateDockerfile()` (tâche 3) valide `version` avec un motif
+   * strictement numérique avant même de regarder la famille — une version fabriquée ici
+   * exploserait au jalon 3b pour une raison que ce module aurait pu éviter.
+   */
+  it("refuse quand la version de Node n'a pas pu être déduite du dépôt", () => {
+    const result = composePlan(
+      instance(),
+      project({
+        runtime: { family: "node", evidence: ["package.json"], version: null, packageManager: "pnpm" },
+      }),
+      facts(),
+      classification(),
+      options
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.because).toMatch(/version/i)
+    expect(result.because).toMatch(/node/i)
+  })
+
+  it("refuse quand la version de Python n'a pas pu être déduite du dépôt", () => {
+    const result = composePlan(
+      instance(),
+      project({
+        runtime: { family: "python", evidence: ["requirements.txt"], version: null, packageManager: null },
+        output: { mode: "server", directory: null },
+        framework: "fastapi",
+      }),
+      facts(),
+      classification(),
+      options
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.because).toMatch(/version/i)
+    expect(result.because).toMatch(/python/i)
+  })
+
+  /**
+   * Ajouté en relecture : les 18 tests du brief n'exerçaient `caddyAlreadyInstalled` qu'en
+   * régime skynode, où le bloc entier est sauté avant de l'atteindre — redondant. Le cas
+   * réel est ici : `facts.docker.present` peut être vrai sans que
+   * `/etc/skynode/state.json` existe (régime docker), avec Caddy déjà posé à la main ou
+   * par un déploiement SkyNode antérieur non retracé dans l'état.
+   */
+  it("ne réinstalle pas Caddy en régime docker quand le conteneur existe déjà", () => {
+    const result = composePlan(
+      instance(),
+      project(),
+      facts({
+        docker: {
+          present: true,
+          usable: true,
+          version: "",
+          compose: true,
+          networks: [],
+          containers: [{ name: "skynode-caddy", image: "caddy:2", state: "running", ports: "" }],
+        },
+      }),
+      classification({ regime: "docker" }),
+      options
+    )
+    if (!result.ok) throw new Error("aurait dû composer")
+
+    const types = result.plan.etapes.map((e) => e.type)
+    expect(types).not.toContain("proxy.caddy.install")
+    expect(types).not.toContain("host.install_docker")
+    expect(types).toContain("host.prepare")
+  })
 })

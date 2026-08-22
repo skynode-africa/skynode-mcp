@@ -205,6 +205,11 @@ export function composePlan(
     tag: `skynode/${options.application}`,
   })
 
+  // Aucune validation de chemin ici (`../../root/.ssh/id_rsa`, une absolue, un saut de
+  // ligne) : ce module compose une proposition, il ne juge pas de la sûreté d'un chemin
+  // contre l'état réel de la machine cible. C'est `apply_plan` (spec §6.1.6, tâche 5) qui
+  // revalide `depuis` avant toute écriture — un contrôle ici serait un second avis sur une
+  // question que ce module n'a pas les moyens de trancher correctement.
   if (options.envFile !== undefined) {
     etapes.push({ type: "env.write", depuis: options.envFile })
   }
