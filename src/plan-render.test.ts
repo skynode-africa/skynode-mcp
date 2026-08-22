@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest"
 
 import { formatPlan, formatRefusal, formatViolations } from "./plan-render.js"
 import type { Plan } from "./plan-types.js"
+import { validatePlan } from "./plan-validate.js"
+import type { ServerFacts } from "./probe.js"
+import { classify } from "./regime.js"
 
 /**
  * Un plan portant **les neuf étapes**, contrairement à celui de la tâche 5 qui n'en a que
@@ -141,5 +144,123 @@ describe("formatViolations", () => {
     const rendu = formatViolations([{ regle: "empreinte", message: "La machine a changé." }])
 
     expect(rendu).not.toMatch(/exception|stack|undefined/i)
+  })
+})
+
+/**
+ * `formatViolations` contre de **vrais** messages de `plan-validate.ts`, pas contre les
+ * fixtures écrites à la main ci-dessus : ces messages embarquent déjà leur propre
+ * référence d'étape, en base 0 (`étape 0 (host.install_docker) contredit…`) — un défaut
+ * que les fixtures du brief, volontairement dépourvues de ce préfixe, ne pouvaient pas
+ * révéler. Sans ce test, un plan fautif rendrait deux numéros d'étape pour un seul fait.
+ *
+ * Une Ubuntu 24.04 en root, Docker déjà présent et utilisable : le régime constaté est
+ * "docker", exécutable, sans quoi `validatePlan` refuserait le plan sur le régime avant
+ * même d'atteindre la violation qu'on veut isoler ici.
+ */
+function serverFacts(): ServerFacts {
+  return {
+    host: {
+      user: "root",
+      uid: 0,
+      arch: "x86_64",
+      kernel: "6.8.0",
+      osId: "ubuntu",
+      osVersion: "24.04",
+      osName: "Ubuntu 24.04.1 LTS",
+    },
+    resources: { cpu: 4, memoryMb: 7943, swapMb: 0, diskUsePercent: 8 },
+    access: { elevate: "root" },
+    docker: { present: true, usable: true, version: "27.0.0", compose: true, containers: [], networks: [] },
+    podmanPresent: false,
+    binaries: [],
+    listeners: [],
+    services: [],
+    panel: null,
+    skynode: { present: false, raw: null },
+  }
+}
+
+/** Un plan fautif d'une seule façon à la fois, pour isoler la violation qu'on veut lire. */
+function faultyPlan(etapes: Plan["etapes"]): Plan {
+  const facts = serverFacts()
+  const classification = classify(facts)
+
+  return {
+    version: 1,
+    id: "plan_01K7Z8Q2",
+    serveur: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+    regime: classification.regime,
+    // La valeur exacte n'importe pas ici : seule la forme du texte de violation compte,
+    // pas la règle "empreinte" — non déclenchée volontairement par ces tests.
+    empreinte_etat: "sha256:" + "a".repeat(64),
+    application: "boutique",
+    resume: "Plan de test, délibérément fautif.",
+    etapes,
+    hors_perimetre: [],
+    reversible: true,
+  }
+}
+
+function renderedViolations(etapes: Plan["etapes"]): { rendu: string; violations: string[] } {
+  const facts = serverFacts()
+  const classification = classify(facts)
+  const result = validatePlan(faultyPlan(etapes), facts, classification)
+
+  if (result.ok) throw new Error("le plan de test aurait dû être refusé")
+
+  return { rendu: formatViolations(result.violations), violations: result.violations.map((v) => v.message) }
+}
+
+describe("formatViolations avec de vraies violations de plan-validate.ts", () => {
+  it("rend une dépendance violée avec un seul numéro d'étape", () => {
+    // app.run avant build.image : viole l'ordre, pas les bornes ni la contradiction.
+    const { rendu } = renderedViolations([
+      { type: "app.run", port_interne: 3000, reseau: "skynode" },
+      { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+      { type: "state.record" },
+    ] as never)
+
+    expect(rendu).toContain("étape 1")
+    expect(rendu).not.toContain("étape 0")
+    expect(rendu.match(/étape \d+/g)).toHaveLength(1)
+  })
+
+  it("rend une borne dépassée avec un seul numéro d'étape", () => {
+    // Étiquette hors du périmètre "skynode/…" : viole les bornes, pas les dépendances.
+    const { rendu } = renderedViolations([
+      { type: "build.image", source: { type: "local", path: "." }, tag: "registre-tiers/boutique" },
+      { type: "state.record" },
+    ] as never)
+
+    expect(rendu).toContain("étape 1")
+    expect(rendu).not.toContain("étape 0")
+    expect(rendu.match(/étape \d+/g)).toHaveLength(1)
+  })
+
+  it("rend une contradiction avec un seul numéro d'étape", () => {
+    // Docker est déjà présent et utilisable dans `serverFacts()` : le réinstaller contredit l'état constaté.
+    const { rendu } = renderedViolations([
+      { type: "host.install_docker" },
+      { type: "state.record" },
+    ] as never)
+
+    expect(rendu).toContain("étape 1")
+    expect(rendu).not.toContain("étape 0")
+    expect(rendu.match(/étape \d+/g)).toHaveLength(1)
+  })
+
+  /**
+   * Le repli : un message qui ne commence pas par le gabarit littéral `étape N (...)`
+   * garde son traitement d'origine, un seul préfixe ajouté devant — le comportement
+   * que les tests `formatViolations` ci-dessus, écrits à la main, vérifiaient déjà,
+   * mais qu'il faut préserver explicitement une fois `withEtape` devenu conditionnel.
+   */
+  it("garde le préfixe ajouté quand le message ne porte pas le gabarit attendu", () => {
+    const rendu = formatViolations([
+      { regle: "bornes", message: "Message composé à la main, sans préfixe intégré.", etape: 3 },
+    ])
+
+    expect(rendu).toContain("étape 4 : Message composé à la main, sans préfixe intégré.")
   })
 })

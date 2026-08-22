@@ -117,9 +117,37 @@ const REGLE_LABELS: Record<Violation["regle"], string> = {
  */
 const REGLE_ORDER: Violation["regle"][] = ["empreinte", "dependances", "contradiction", "regime", "bornes"]
 
-/** Base 1 : un développeur qui lit « étape 2 » compte à partir de un, `Violation.etape` reste un index de tableau. */
+/**
+ * Les 24 messages de `plan-validate.ts` qui portent un `etape` font tous naître leur
+ * texte du même gabarit littéral : `étape ${index}` (base 0) suivi d'un espace puis soit
+ * `(type)`, soit `:`. Reconnaître ce début exact — jamais en extraire le reste par
+ * analyse de texte — permet de réécrire seulement le nombre, sans perdre le nom de type
+ * qu'il porte parfois entre parenthèses.
+ *
+ * Un message qui ne commence pas par ce gabarit (un texte composé à la main, ou un
+ * message futur écrit autrement) ne matche pas : on garde le repli d'origine, un
+ * préfixe « étape N : » ajouté devant, plutôt que de risquer une réécriture incorrecte.
+ */
+function embeddedEtapePrefix(etapeZeroBased: number): RegExp {
+  return new RegExp(`^étape ${etapeZeroBased}(?=\\s[:(])`)
+}
+
+/**
+ * Base 1 : un développeur qui lit « étape 2 » compte à partir de un, `Violation.etape`
+ * reste un index de tableau. Sans ce repérage, un message qui embarque déjà sa propre
+ * référence en base 0 (voir `embeddedEtapePrefix`) se retrouverait doublement indexé —
+ * deux nombres différents pour le même fait, sans rien qui dise qu'ils ne comptent pas
+ * de la même façon.
+ */
 function withEtape(message: string, etape: number | undefined): string {
-  return etape === undefined ? message : `étape ${etape + 1} : ${message}`
+  if (etape === undefined) return message
+
+  const prefix = embeddedEtapePrefix(etape)
+  if (prefix.test(message)) {
+    return message.replace(prefix, `étape ${etape + 1}`)
+  }
+
+  return `étape ${etape + 1} : ${message}`
 }
 
 /**
