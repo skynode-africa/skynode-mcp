@@ -119,4 +119,59 @@ describe("parsePlan", () => {
     expect(() => parsePlan(minimal({ id: "../../etc" }))).toThrow(/id/)
     expect(() => parsePlan(minimal({ empreinte_etat: "pasunsha" }))).toThrow(/empreinte/)
   })
+
+  /**
+   * `JSON.parse('{"a":1,"__proto__":{"x":1}}')` crée une clé __proto__ **propre**, que
+   * `Object.defineProperty` reproduit ici plutôt qu'une simple affectation par crochets —
+   * celle-ci invoquerait l'accesseur hérité et changerait le prototype réel au lieu de
+   * poser une clé de donnée, ce qui ne reproduirait pas le cas rapporté.
+   */
+  function withProtoKey(base: Record<string, unknown>): Record<string, unknown> {
+    const copy: Record<string, unknown> = { ...base }
+    Object.defineProperty(copy, "__proto__", {
+      value: { x: 1 },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    })
+    return copy
+  }
+
+  describe("clé __proto__", () => {
+    it("refuse une clé __proto__ à la racine du plan, en la nommant", () => {
+      expect(() => parsePlan(withProtoKey(minimal()))).toThrow(/__proto__/)
+    })
+
+    it("refuse une clé __proto__ dans une étape", () => {
+      const plan = minimal({ etapes: [withProtoKey({ type: "state.record" })] })
+      expect(() => parsePlan(plan)).toThrow(/__proto__/)
+    })
+
+    it("refuse une clé __proto__ dans un objet imbriqué comme source", () => {
+      const plan = minimal({
+        etapes: [
+          {
+            type: "build.image",
+            source: withProtoKey({ type: "local", path: "." }),
+            tag: "skynode/boutique",
+          },
+        ],
+      })
+      expect(() => parsePlan(plan)).toThrow(/__proto__/)
+    })
+
+    it("ne pollue jamais Object.prototype, même quand le plan est refusé", () => {
+      try {
+        parsePlan(withProtoKey(minimal()))
+      } catch {
+        // attendu : le refus est le comportement testé ailleurs
+      }
+      expect((Object.prototype as Record<string, unknown>).x).toBeUndefined()
+    })
+  })
+
+  it("décrit un type d'étape mal typé sans le coercer en chaîne trompeuse", () => {
+    const plan = minimal({ etapes: [{ type: ["app.run"] }] })
+    expect(() => parsePlan(plan)).toThrow(/un tableau/)
+  })
 })

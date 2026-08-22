@@ -41,10 +41,19 @@ const ProxyCaddyInstall = z
 const BuildGenerateDockerfile = z
   .object({
     type: z.literal("build.generate_dockerfile"),
+    /**
+     * Trois familles, pas cinq : la spec §5.4 ne prévoit de gabarit que pour Node, Python
+     * et le statique pur. `pickTemplate` (tâche 3) rend `null` pour PHP et Go, et cette
+     * étape n'existe que lorsqu'un gabarit a été choisi — y admettre `"php"` ou `"go"`
+     * déclarerait un cas que rien ne peut produire. Ne pas « compléter » cette liste sans
+     * qu'un gabarit correspondant existe réellement.
+     */
     famille: z.enum(["node", "python", "static"]),
     version: z.string().min(1).max(20),
-    gestionnaire: z.enum(["pnpm", "npm", "yarn", "pip", "poetry"]),
-    sortie: z.enum(["standalone", "spa"]),
+    /** Mêmes valeurs que `ProjectFacts.runtime.packageManager` (`project-analyze.ts`), `null` inclus : un dépôt sans fichier de verrouillage n'en a pas. */
+    gestionnaire: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
+    /** `OutputMode` (`project-analyze.ts`) moins `"inconnu"` : un mode non déterminé ne peut pas produire de gabarit. */
+    sortie: z.enum(["server", "standalone", "static"]),
     port: z.number().int().min(1).max(65535),
   })
   .strict()
@@ -137,7 +146,8 @@ export const PlanSchema = z
   .object({
     version: z.literal(1),
     id: z.string().regex(/^plan_[A-Za-z0-9]{4,32}$/),
-    serveur: z.string().regex(/^[A-Za-z0-9_-]+$/),
+    /** Un identifiant d'instance est un UUID ; 64 bornent large sans laisser passer une chaîne arbitraire. */
+    serveur: z.string().regex(/^[A-Za-z0-9_-]+$/).max(64),
     regime: z.enum(["vierge", "docker", "skynode"]),
     empreinte_etat: z.string().regex(/^sha256:[0-9a-f]{64}$/),
     application: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
@@ -156,6 +166,39 @@ export class PlanFormatError extends Error {
     super(message)
     this.name = "PlanFormatError"
   }
+}
+
+/**
+ * Vérifie qu'aucun objet de l'arbre ne porte de clé **propre** nommée `__proto__`, avant
+ * de confier l'entrée à Zod.
+ *
+ * `.strict()` teste l'appartenance d'une clé au schéma via `key in shape`, et
+ * `'__proto__' in {}` vaut toujours `true` — c'est l'accesseur hérité d'`Object.prototype`,
+ * pas une clé du schéma. Zod ne voit donc jamais `__proto__` comme une clé en trop : elle
+ * est supprimée en silence au lieu d'être refusée. Rien n'en fuit ici — un `JSON.parse` ne
+ * pollue jamais le vrai `Object.prototype` — mais l'invariant du jalon est de refuser,
+ * jamais d'assainir sans le dire : un plan accepté amputé d'une clé que l'agent ne
+ * retrouve nulle part dans le message est indiscernable d'un plan correct.
+ *
+ * `Object.getOwnPropertyNames` voit la clé propre là où `in` ne la distinguerait pas de
+ * l'héritée ; on parcourt nous-mêmes l'arbre plutôt que de faire confiance au schéma.
+ */
+function findOwnProtoKey(value: unknown, path: PropertyKey[]): PropertyKey[] | null {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      const found = findOwnProtoKey(value[index], [...path, index])
+      if (found) return found
+    }
+    return null
+  }
+  if (value === null || typeof value !== "object") return null
+
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (key === "__proto__") return [...path, key]
+    const found = findOwnProtoKey((value as Record<string, unknown>)[key], [...path, key])
+    if (found) return found
+  }
+  return null
 }
 
 /** Lit une valeur au bout d'un chemin Zod (`["etapes", 0, "type"]`) dans l'entrée d'origine. */
@@ -183,6 +226,23 @@ function formatPath(path: readonly PropertyKey[]): string {
 }
 
 /**
+ * Décrit une valeur fournie pour un message d'erreur, sans jamais la coercer en chaîne :
+ * `String(["app.run"])` vaut `"app.run"`, ce qui ferait dire au message qu'une valeur
+ * appartient au vocabulaire fermé alors qu'elle n'est même pas une chaîne. Un agent qui
+ * lit ça en conclurait que le validateur est cassé, pas que son plan l'est.
+ */
+function describeValue(value: unknown): string {
+  if (value === undefined) return "absent"
+  if (value === null) return "null"
+  if (Array.isArray(value)) return "un tableau"
+  if (typeof value === "number") return "un nombre"
+  if (typeof value === "boolean") return "un booléen"
+  if (typeof value === "string") return `"${value}"`
+  if (typeof value === "object") return "un objet"
+  return "une valeur non prise en charge"
+}
+
+/**
  * Traduit une `ZodError` en un message français, un par ligne, que l'agent qui a produit
  * le plan peut lire pour le corriger. Ne jamais laisser passer le message anglais de Zod :
  * « Invalid input » l'enverrait tout réécrire au hasard.
@@ -205,7 +265,7 @@ function formatIssue(issue: z.core.$ZodIssue, entree: unknown): string {
 
   if (issue.code === "invalid_union" && issue.path[issue.path.length - 1] === "type") {
     const fourni = readAtPath(entree, issue.path)
-    return `${chemin} : type d'étape inconnu — "${String(fourni)}" ne fait pas partie du vocabulaire fermé`
+    return `${chemin} : type d'étape inconnu — ${describeValue(fourni)} ne fait pas partie du vocabulaire fermé`
   }
 
   if (issue.code === "too_small" && issue.path.length === 1 && issue.path[0] === "etapes") {
@@ -231,6 +291,13 @@ function formatIssue(issue: z.core.$ZodIssue, entree: unknown): string {
  * français exploitable par l'agent qui a produit le plan.
  */
 export function parsePlan(value: unknown): Plan {
+  const protoPath = findOwnProtoKey(value, [])
+  if (protoPath) {
+    throw new PlanFormatError(
+      `plan invalide :\n${formatPath(protoPath)} : clé "__proto__" interdite`
+    )
+  }
+
   const result = PlanSchema.safeParse(value)
   if (result.success) return result.data
 
