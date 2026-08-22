@@ -156,3 +156,139 @@ describe("pickTemplate", () => {
     expect(pickTemplate(famille, sortie)).toBeNull()
   })
 })
+
+/**
+ * Défauts trouvés par relecture via de vraies constructions Docker (huit défauts sur
+ * quinze constructions), invisibles aux tests de forme ci-dessus car ils ne portent que
+ * sur le texte. Chaque test ici cible le défaut précis mesuré, pas une reformulation.
+ */
+describe("port effectif à l'exécution, pas seulement documentatif (C1)", () => {
+  it("standalone : le port choisi devient la variable que server.js lit", () => {
+    const df = generateDockerfile({ ...nextStandalone, port: 8080 })
+
+    expect(df).toContain("EXPOSE 8080")
+    expect(df).toContain("ENV PORT=8080")
+  })
+
+  it.each([
+    [
+      "node/static",
+      { famille: "node", sortie: "static", version: "22", gestionnaire: "pnpm", repertoire: "dist" } as const,
+    ],
+    [
+      "statique pur",
+      { famille: "static", sortie: "static", version: "1", gestionnaire: null, repertoire: "public" } as const,
+    ],
+  ] as const)("%s : nginx écoute réellement le port choisi", (_label, base) => {
+    const df = generateDockerfile({ ...base, port: 8080 })
+
+    expect(df).toContain("EXPOSE 8080")
+    expect(df).toMatch(/listen 8080;/)
+  })
+})
+
+describe("généré Dockerignore : fuite de secrets imbriqués (C2)", () => {
+  it("exclut les .env et .npmrc à toute profondeur, pas seulement à la racine", () => {
+    const lignes = generateDockerignore().split("\n")
+
+    expect(lignes).toContain("**/.env")
+    expect(lignes.some((l) => l.startsWith("**/.env."))).toBe(true)
+    expect(lignes).toContain(".npmrc")
+    expect(lignes).toContain("**/.npmrc")
+  })
+
+  it("exclut les artefacts Python locaux (venv, bytecode)", () => {
+    const lignes = generateDockerignore().split("\n")
+
+    expect(lignes).toContain(".venv")
+    expect(lignes).toContain("venv")
+    expect(lignes).toContain("__pycache__")
+    expect(lignes).toContain("*.pyc")
+  })
+})
+
+describe("le .dockerignore et le gabarit statique ne s'annulent plus (I3)", () => {
+  it("réintroduit le répertoire de sortie qu'on lui désigne", () => {
+    const lignes = generateDockerignore("dist").split("\n")
+
+    expect(lignes).toContain("dist")
+    expect(lignes).toContain("!dist")
+  })
+
+  it("sans argument, le comportement déjà éprouvé ne change pas", () => {
+    const lignes = generateDockerignore().split("\n")
+
+    expect(lignes.some((l) => l.startsWith("!"))).toBe(true) // seule !.env.example
+    expect(lignes.filter((l) => l.startsWith("!"))).toEqual(["!.env.example"])
+  })
+})
+
+describe("Node/serveur transporte les répertoires d'exécution usuels (I4)", () => {
+  it("copie vues, locales, migrations et gabarits quand ils existent", () => {
+    const df = generateDockerfile({
+      famille: "node", sortie: "server", version: "22",
+      gestionnaire: "pnpm", port: 3000, repertoire: null,
+    })
+
+    for (const dir of ["public", "views", "locales", "prisma", "static", "templates"]) {
+      expect(df).toContain(`COPY --from=builder /app/${dir} ./${dir}`)
+    }
+  })
+})
+
+describe("Next standalone : permissions et interface d'écoute (I1, I2)", () => {
+  it("le dossier .next appartient à l'utilisateur applicatif, cache compris", () => {
+    const df = generateDockerfile(nextStandalone)
+
+    expect(df).toMatch(/COPY --from=builder --chown=skynode:skynode/)
+    expect(df).toContain("mkdir -p .next/cache && chown -R skynode:skynode .next/cache")
+  })
+
+  it("écoute sur toutes les interfaces, pas seulement l'identifiant du conteneur", () => {
+    const df = generateDockerfile(nextStandalone)
+
+    expect(df).toContain("ENV HOSTNAME=0.0.0.0")
+  })
+})
+
+describe("bun se construit dans une image qui a bun (I5)", () => {
+  it.each([
+    ["standalone", { ...nextStandalone, gestionnaire: "bun" } as const],
+    [
+      "server",
+      { famille: "node", sortie: "server", version: "22", gestionnaire: "bun", port: 3000, repertoire: null } as const,
+    ],
+    [
+      "static",
+      { famille: "node", sortie: "static", version: "22", gestionnaire: "bun", port: 80, repertoire: "dist" } as const,
+    ],
+  ] as const)("%s : l'étape de construction a un binaire bun", (_label, params) => {
+    const df = generateDockerfile(params)
+
+    expect(df).toMatch(/^FROM oven\/bun:[\w.-]+ AS builder$/m)
+    expect(df).toContain("bun run build")
+  })
+})
+
+describe("Python : hors bornes documentées (I6)", () => {
+  it("journalise sans tampon (M5)", () => {
+    const df = generateDockerfile({
+      famille: "python", sortie: "server", version: "3.12",
+      gestionnaire: null, port: 8000, repertoire: null,
+    })
+
+    expect(df).toContain("ENV PYTHONUNBUFFERED=1")
+  })
+})
+
+describe("images de base épinglées (M1)", () => {
+  it("busybox du gabarit statique pur n'est jamais :latest", () => {
+    const df = generateDockerfile({
+      famille: "static", sortie: "static", version: "1",
+      gestionnaire: null, port: 80, repertoire: "public",
+    })
+
+    expect(df).toMatch(/^FROM busybox:[\w.-]+ AS prepare$/m)
+    expect(df).not.toContain("FROM busybox AS prepare")
+  })
+})

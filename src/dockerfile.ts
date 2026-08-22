@@ -34,12 +34,63 @@ const DIRECTORY_PATTERN = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/
 const PORT_MIN = 1
 const PORT_MAX = 65535
 
-/** La commande d'installation par gestionnaire, verrouillée sur le fichier de lock qu'il produit. */
+/**
+ * La commande d'installation par gestionnaire, verrouillée sur le fichier de lock qu'il
+ * produit.
+ *
+ * `corepack enable` seul active la dernière version publiée de pnpm ou yarn, sans épingle
+ * — c'est exactement l'incident déjà vécu par ce dépôt (voir `CLAUDE.md` à la racine :
+ * la sortie de pnpm 11.18.0 a cassé les deux images de SkyNode sans qu'une ligne du projet
+ * n'ait changé). `DockerfileParams` ne porte que la famille du gestionnaire (`"pnpm"`),
+ * jamais la version que le client a figée dans son `packageManager` — ce gabarit ne peut
+ * donc pas la lire pour l'épingler ici. Le risque reste ouvert tant qu'un champ dédié
+ * n'est pas ajouté au contrat du plan (hors périmètre de cette tâche).
+ */
 const INSTALL: Record<"pnpm" | "npm" | "yarn" | "bun", string> = {
   pnpm: "corepack enable && pnpm install --frozen-lockfile",
   npm: "npm ci",
   yarn: "corepack enable && yarn install --frozen-lockfile",
   bun: "bun install --frozen-lockfile",
+}
+
+/**
+ * `bun` n'existe pas dans les images `node:*-alpine` : l'étape de construction a besoin
+ * de son propre binaire, faute de quoi `bun install` échoue dès sa première commande —
+ * mesuré en relecture (I5) sur les trois gabarits qui construisent depuis Node. Bun a son
+ * propre schéma de version, distinct de celui de Node : on épingle donc sa branche
+ * majeure stable plutôt que de réutiliser `params.version`, qui continue de décrire le
+ * Node de l'étape finale d'exécution — seule l'étape de construction change de base.
+ */
+function builderImage(params: DockerfileParams): string {
+  return params.gestionnaire === "bun" ? "oven/bun:1-alpine" : `node:${params.version}-alpine`
+}
+
+/** L'image `oven/bun` n'a pas de binaire `npm` : le script `build` s'invoque via `bun run`. */
+function buildCommand(gestionnaire: DockerfileParams["gestionnaire"]): string {
+  return gestionnaire === "bun" ? "bun run build" : "npm run build"
+}
+
+/**
+ * `EXPOSE` documente un port, il ne le fait pas écouter : la configuration par défaut de
+ * `nginx:alpine` reste sur le port 80 quel que soit le port choisi ici, et un serveur qui
+ * écoute au mauvais endroit reste `Up` tout en ne répondant jamais — mesuré en
+ * construction réelle (relecture, C1). On réécrit le bloc serveur entier avec le port
+ * effectif plutôt que de compter sur la valeur par défaut de l'image.
+ */
+function nginxListenCommand(port: number): string {
+  const conf =
+    "server {\\n" +
+    `    listen ${port};\\n` +
+    `    listen [::]:${port};\\n` +
+    "    server_name _;\\n" +
+    "    root /usr/share/nginx/html;\\n" +
+    "    index index.html index.htm;\\n" +
+    "    location / {\\n" +
+    "        try_files $uri $uri/ =404;\\n" +
+    "    }\\n" +
+    "}\\n"
+
+  return `RUN printf '${conf}' > /etc/nginx/conf.d/default.conf`
 }
 
 /**
@@ -127,7 +178,7 @@ function nodeServerOrStandalone(params: DockerfileParams): string {
 
   if (params.sortie === "standalone") {
     return [
-      `FROM node:${params.version}-alpine AS builder`,
+      `FROM ${builderImage(params)} AS builder`,
       "WORKDIR /app",
       copyLock,
       `RUN ${install}`,
@@ -137,14 +188,28 @@ function nodeServerOrStandalone(params: DockerfileParams): string {
       // un répertoire absent — la construction ne doit pas dépendre d'un dossier que
       // create-next-app scaffolde par convention, jamais par obligation.
       "RUN mkdir -p public",
-      "RUN npm run build",
+      `RUN ${buildCommand(params.gestionnaire)}`,
       "",
       `FROM node:${params.version}-alpine`,
       "WORKDIR /app",
       "RUN addgroup -S skynode && adduser -S skynode -G skynode",
-      "COPY --from=builder /app/.next/standalone ./",
-      "COPY --from=builder /app/.next/static ./.next/static",
-      "COPY --from=builder /app/public ./public",
+      // `--chown` sur les trois copies, sinon `.next` appartient à root : la première
+      // page ISR ou le premier `next/image` tente d'écrire dans un répertoire qu'il ne
+      // possède pas et échoue à l'exécution, jamais à la construction — mesuré en
+      // relecture (I1), même classe de défaut que le `/var/run` déjà corrigé plus haut.
+      "COPY --from=builder --chown=skynode:skynode /app/.next/standalone ./",
+      "COPY --from=builder --chown=skynode:skynode /app/.next/static ./.next/static",
+      "COPY --from=builder --chown=skynode:skynode /app/public ./public",
+      // `.next/cache` n'est pas livré par la construction : Next le crée à la première
+      // requête. Sans ce répertoire, déjà possédé par l'utilisateur applicatif, la même
+      // écriture échoue au même titre que les trois copies ci-dessus.
+      "RUN mkdir -p .next/cache && chown -R skynode:skynode .next/cache",
+      // `server.js` lit `PORT` : sans cette variable, Next reste sur son défaut (3000)
+      // quel que soit l'`EXPOSE` déclaré — le port choisi devient alors décoratif, mesuré
+      // en relecture (C1). `HOSTNAME` évite de n'écouter que sur l'adresse du conteneur,
+      // qui ne fonctionne qu'en bridge par accident (I2).
+      `ENV PORT=${params.port}`,
+      "ENV HOSTNAME=0.0.0.0",
       "USER skynode",
       `EXPOSE ${params.port}`,
       'CMD ["node", "server.js"]',
@@ -155,12 +220,18 @@ function nodeServerOrStandalone(params: DockerfileParams): string {
   // `server` : l'application se lance via son propre script `start`, `node_modules`
   // (hors devDependencies) doit donc survivre jusqu'à l'exécution.
   return [
-    `FROM node:${params.version}-alpine AS builder`,
+    `FROM ${builderImage(params)} AS builder`,
     "WORKDIR /app",
     copyLock,
     `RUN ${install}`,
     "COPY . .",
-    "RUN npm run build",
+    // Un serveur applicatif dépend souvent de fichiers que la construction ne produit
+    // pas : vues, traductions, gabarits, schéma de migrations. Aucun n'est garanti, et un
+    // `COPY` sur un répertoire absent ferait échouer la construction — même motif de
+    // garde que `public/` plus haut, pour ne pas livrer un conteneur qui démarre et reste
+    // `Up` tout en rendant `ENOENT` à la première requête (I4).
+    "RUN mkdir -p public views locales prisma static templates",
+    `RUN ${buildCommand(params.gestionnaire)}`,
     "",
     `FROM node:${params.version}-alpine`,
     "WORKDIR /app",
@@ -169,6 +240,12 @@ function nodeServerOrStandalone(params: DockerfileParams): string {
     copyLock,
     `RUN ${gestionnaireProdInstall(params.gestionnaire)}`,
     "COPY --from=builder /app/dist ./dist",
+    "COPY --from=builder /app/public ./public",
+    "COPY --from=builder /app/views ./views",
+    "COPY --from=builder /app/locales ./locales",
+    "COPY --from=builder /app/prisma ./prisma",
+    "COPY --from=builder /app/static ./static",
+    "COPY --from=builder /app/templates ./templates",
     "USER skynode",
     `EXPOSE ${params.port}`,
     'CMD ["npm", "start"]',
@@ -203,18 +280,19 @@ function nodeStatic(params: DockerfileParams): string {
   validateDirectory(repertoire)
 
   return [
-    `FROM node:${params.version}-alpine AS builder`,
+    `FROM ${builderImage(params)} AS builder`,
     "WORKDIR /app",
     copyLock,
     `RUN ${install}`,
     "COPY . .",
-    "RUN npm run build",
+    `RUN ${buildCommand(params.gestionnaire)}`,
     "",
     "FROM nginx:alpine",
     `COPY --from=builder /app/${repertoire} /usr/share/nginx/html`,
     "RUN addgroup -S skynode && adduser -S skynode -G skynode " +
       "&& chown -R skynode:skynode /usr/share/nginx/html " +
       "&& chown -R skynode:skynode /var/cache/nginx /run",
+    nginxListenCommand(params.port),
     "USER skynode",
     `EXPOSE ${params.port}`,
     'CMD ["nginx", "-g", "daemon off;"]',
@@ -226,6 +304,14 @@ function nodeStatic(params: DockerfileParams): string {
  * Python, sortie `server` (ASGI) : une étape qui compile les dépendances éventuellement
  * natives, une étape d'exécution qui ne recopie que le paquet installé — jamais les
  * en-têtes ni le compilateur qui l'ont produit.
+ */
+/**
+ * Deux hypothèses non paramétrées, assumées volontairement (I6) : `requirements.txt` est
+ * le seul format de dépendances lu (pas de `pyproject.toml`/`poetry.lock`), et le point
+ * d'entrée ASGI est toujours `main:app`. Les deux échecs sont bruyants — `pip` refuse
+ * l'absence du premier, `uvicorn` refuse l'absence du second — donc acceptables pour ce
+ * jalon. `DockerfileParams` n'a pas de champ pour l'un ou l'autre : les paramétrer est un
+ * travail pour la tâche 4, pas un oubli de celle-ci.
  */
 function pythonServer(params: DockerfileParams): string {
   return [
@@ -241,6 +327,11 @@ function pythonServer(params: DockerfileParams): string {
     "COPY --from=builder /root/.local /home/skynode/.local",
     "COPY --from=builder /app .",
     "ENV PATH=/home/skynode/.local/bin:$PATH",
+    // Sans cette variable, la sortie standard de Python est bufferisée par bloc dès
+    // qu'elle ne va pas vers un terminal — le cas de `docker logs`. Les journaux
+    // n'apparaissent alors qu'en rafale, ou jamais si le conteneur s'arrête avant que le
+    // tampon ne se vide : précisément le moment où le support en a besoin (M5).
+    "ENV PYTHONUNBUFFERED=1",
     "RUN chown -R skynode:skynode /app",
     "USER skynode",
     `EXPOSE ${params.port}`,
@@ -258,7 +349,10 @@ function staticSite(params: DockerfileParams): string {
   const repertoire = params.repertoire ?? "."
 
   return [
-    "FROM busybox AS prepare",
+    // Épinglée (M1) : `busybox:latest` changerait l'image sous les pieds du client à
+    // chaque reconstruction, pour une étape qui ne fait pourtant que recopier des
+    // fichiers déjà présents dans le dépôt.
+    "FROM busybox:1.36 AS prepare",
     "WORKDIR /site",
     `COPY ${repertoire} .`,
     "",
@@ -267,6 +361,7 @@ function staticSite(params: DockerfileParams): string {
     "RUN addgroup -S skynode && adduser -S skynode -G skynode " +
       "&& chown -R skynode:skynode /usr/share/nginx/html " +
       "&& chown -R skynode:skynode /var/cache/nginx /run",
+    nginxListenCommand(params.port),
     "USER skynode",
     `EXPOSE ${params.port}`,
     'CMD ["nginx", "-g", "daemon off;"]',
@@ -280,24 +375,53 @@ function staticSite(params: DockerfileParams): string {
  * construction locale, et surtout tout fichier d'environnement — un `.env` copié dans une
  * couche d'image est lisible par quiconque obtient cette image, y compris longtemps après
  * qu'un secret a été changé côté client.
+ *
+ * Les motifs ancrés à la racine (`.env`, `.npmrc`) ne couvrent pas un monorepo — le cas
+ * courant chez la cible (`apps/web` + `packages/api`) — où le secret vit à
+ * `apps/api/.env` ou où `.npmrc` porte un jeton d'authentification npm à la racine d'un
+ * paquet imbriqué. `**` couvre les deux profondeurs sans dupliquer la règle par
+ * sous-dossier (mesuré en relecture, C2 : `/ctx/apps/api/.env` et `/ctx/.npmrc`
+ * échappaient tous deux aux motifs précédents).
+ *
+ * `preserveDir` réintroduit un répertoire par ailleurs exclu ici (`dist`, `build`) : le
+ * gabarit statique pur (`pickTemplate` → `"static"`) sert un site déjà construit et
+ * committé, dont le dossier s'appelle presque toujours `dist` ou `build` — sans cette
+ * exception, `.dockerignore` et le `Dockerfile` qu'il accompagne s'annulent l'un l'autre
+ * (I3). Le paramètre reste optionnel : la tâche 4 le fournit quand la sortie est
+ * statique, et l'appel sans argument garde le comportement déjà éprouvé pour tous les
+ * autres gabarits.
  */
-export function generateDockerignore(): string {
-  return [
+export function generateDockerignore(preserveDir: string | null = null): string {
+  const lignes = [
     "node_modules",
     ".git",
     ".gitignore",
     ".env",
     ".env.*",
+    "**/.env",
+    "**/.env.*",
     "!.env.example",
+    ".npmrc",
+    "**/.npmrc",
     "Dockerfile",
     ".dockerignore",
     ".next",
     "dist",
     "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "*.pyc",
     "*.log",
     ".DS_Store",
-    "",
-  ].join("\n")
+  ]
+
+  if (preserveDir !== null) {
+    validateDirectory(preserveDir)
+    lignes.push(`!${preserveDir}`)
+  }
+
+  return [...lignes, ""].join("\n")
 }
 
 /**
