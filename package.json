@@ -1,6 +1,6 @@
 {
   "name": "@skynode/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Serveur MCP SkyNode — pilotez vos serveurs depuis votre agent de code",
   "license": "MIT",
   "type": "module",
@@ -14,8 +14,8 @@
     "url": "git+https://github.com/zampou-code/skynode-mcp.git"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json && chmod +x dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "pnpm build"
