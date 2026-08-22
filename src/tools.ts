@@ -4,6 +4,10 @@ import { z } from "zod"
 import type { SkyNodeApi } from "./api.js"
 import { SkyNodeError } from "./api.js"
 import { formatInstanceDetail, formatInstanceList } from "./format.js"
+import { composePlan } from "./plan-compose.js"
+import { formatPlan, formatRefusal, formatViolations } from "./plan-render.js"
+import { PlanFormatError } from "./plan-types.js"
+import { validatePlan } from "./plan-validate.js"
 import { analyzeProject } from "./project-analyze.js"
 import { ScanError, scanProject } from "./project-scan.js"
 import { PROBE_SCRIPT, ProbeError, parseProbe } from "./probe.js"
@@ -50,7 +54,12 @@ async function guard(run: () => Promise<ToolResult>): Promise<ToolResult> {
   try {
     return await run()
   } catch (error: unknown) {
-    if (error instanceof SkyNodeError || error instanceof ScanError || error instanceof ProbeError) {
+    if (
+      error instanceof SkyNodeError ||
+      error instanceof ScanError ||
+      error instanceof ProbeError ||
+      error instanceof PlanFormatError
+    ) {
       return failure(error.message)
     }
 
@@ -159,6 +168,74 @@ export function registerTools(server: McpServer, api: SkyNodeApi, ssh: SshRunner
         const facts = parseProbe(result.stdout)
 
         return text(formatServerReport(instance, facts, classify(facts)))
+      })
+  )
+
+  server.registerTool(
+    "plan_deployment",
+    {
+      title: "Proposer un plan de déploiement",
+      description:
+        "Constate le projet et le serveur, puis propose un plan de déploiement détaillé : " +
+        "ce qui sera installé, construit, démarré et publié, dans l'ordre. N'exécute rien — " +
+        "le plan est à lire et à faire approuver par le développeur avant toute action. " +
+        "Rend un refus motivé quand le serveur ne peut pas recevoir de déploiement, ou quand " +
+        "le projet n'est pas déployable en l'état.",
+      inputSchema: {
+        server_id: z
+          .string({ error: "L’identifiant du serveur est obligatoire. Obtenez-le avec list_servers." })
+          .describe("Identifiant du serveur, tel que rendu par list_servers"),
+        project_path: z
+          .string({ error: "Le chemin absolu de la racine du projet est obligatoire." })
+          .describe("Chemin absolu de la racine du projet à déployer"),
+        application: z
+          .string({ error: "Le nom de l’application est obligatoire : minuscules, chiffres et tirets." })
+          .describe("Nom de l’application : minuscules, chiffres et tirets, 32 caractères au plus"),
+        domaine: z
+          .string()
+          .optional()
+          .describe("Domaine à publier en HTTPS. Sans lui, l’application n’est pas exposée"),
+        env_file: z
+          .string()
+          .optional()
+          .describe("Chemin, relatif au projet, du fichier d’environnement à transférer"),
+      },
+    },
+    async ({ server_id, project_path, application, domaine, env_file }) =>
+      guard(async () => {
+        const project = analyzeProject(await scanProject(project_path))
+
+        const instance = await api.getInstance(server_id)
+        const target = resolveSshTarget(instance)
+        const result = await ssh.run(target, PROBE_SCRIPT)
+
+        const echec = explainSsh(result)
+        if (echec) return failure(echec)
+
+        const server = parseProbe(result.stdout)
+        const classification = classify(server)
+
+        const composed = composePlan(instance, project, server, classification, {
+          application,
+          ...(domaine === undefined ? {} : { domaine }),
+          ...(env_file === undefined ? {} : { envFile: env_file }),
+        })
+
+        if (!composed.ok) return failure(formatRefusal(composed.because, composed.guidance))
+
+        // Le composeur ne s'auto-valide pas : si le filet cède ici, c'est un bogue de
+        // SkyNode, pas une faute du développeur — le message doit le dire.
+        const validation = validatePlan(composed.plan, server, classification)
+        if (!validation.ok) {
+          return failure(
+            "Le plan composé n’a pas passé sa propre validation — c’est un défaut de " +
+              "SkyNode, pas de votre projet. Signalez-le sur " +
+              "github.com/zampou-code/skynode-mcp/issues avec ce détail :\n" +
+              formatViolations(validation.violations)
+          )
+        }
+
+        return text(formatPlan(composed.plan))
       })
   )
 }
