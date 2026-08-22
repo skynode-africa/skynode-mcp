@@ -22,7 +22,10 @@ export interface Violation {
    * n'y figure pas : `parsePlan` l'a déjà tranchée dans le chemin normal. Mais rien ne
    * force un appelant à passer par elle avant d'atteindre `validatePlan` — c'est
    * pourquoi un type d'étape hors du vocabulaire fermé, ou une étape mal formée, se
-   * refusent quand même ici, sous la règle `dependances` ou `bornes` selon le cas.
+   * refusent quand même ici, sous la règle `dependances` ou `bornes` selon le cas. Ceci
+   * vaut pour le `type` de chaque étape ; un sous-champ discriminant imbriqué, comme
+   * `build.image.source.type`, n'est pas revérifié de la même façon — seule sa forme
+   * (un `path` en chaîne) l'est ici, pas son appartenance au vocabulaire fermé.
    */
   regle: "empreinte" | "dependances" | "contradiction" | "regime" | "bornes"
   /** Ce qui ne va pas, en français, adressé à un agent qui doit corriger. */
@@ -134,14 +137,18 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
     (`regime.ts`) est la seule source de vérité sur ce que ces faits impliquent ; on la
     rappelle ici plutôt que de faire confiance à l'appariement fourni.
   */
-  const regimeReel = classify(facts).regime
-  if (regimeReel !== classification.regime) {
+  const classificationReelle = classify(facts)
+  if (
+    classificationReelle.regime !== classification.regime ||
+    classificationReelle.executable !== classification.executable
+  ) {
     violations.push({
       regle: "regime",
       message:
-        `La classification fournie ("${classification.regime}") ne découle pas des faits ` +
-        `constatés, qui donnent le régime "${regimeReel}" : cet appariement ne peut pas venir ` +
-        "d'un constat cohérent de la machine.",
+        `La classification fournie ("${classification.regime}", executable: ` +
+        `${classification.executable}) ne découle pas des faits constatés, qui donnent le ` +
+        `régime "${classificationReelle.regime}" (executable: ${classificationReelle.executable}) : ` +
+        "cet appariement ne peut pas venir d'un constat cohérent de la machine.",
     })
   }
 

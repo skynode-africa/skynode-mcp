@@ -529,6 +529,57 @@ describe("validatePlan — cohérence entre les faits et la classification fourn
 
     expect(regles(p, f, c)).toContain("regime")
   })
+
+  /**
+   * Démontré en relecture : le régime seul ne suffit pas. `classify(facts)` rendrait
+   * "occupe", executable: false pour ces faits (nginx tient le port 80) ; ici le
+   * régime déclaré correspond mais `executable: true` est forgé. `plan.regime` est
+   * aligné sur "occupe" pour que ni la règle 5 (`plan.regime !== classification.regime`)
+   * ni son premier contrôle (`!classification.executable`) ne produisent seuls la
+   * violation — seule la comparaison de `executable` ajoutée au contrôle de cohérence
+   * doit la faire apparaître ici.
+   */
+  it("refuse un executable menteur alors que le régime déclaré correspond", () => {
+    const f = facts({ listeners: [{ address: "0.0.0.0", port: 80, process: "nginx" }] })
+    const c = classification({ regime: "occupe", executable: true })
+    const p = plan({ regime: "occupe" as never, empreinte_etat: computeFingerprint(f, c) })
+
+    expect(regles(p, f, c)).toContain("regime")
+  })
+
+  /** Une paire cohérente ne doit pas déclencher le nouveau contrôle — sur les trois régimes exécutables. */
+  it.each([
+    ["vierge", facts(), classification()],
+    ["docker",
+      facts({ docker: { present: true, usable: true, version: "", compose: true, containers: [], networks: [] } }),
+      classification({ regime: "docker" })],
+    ["skynode",
+      facts({ skynode: { present: true, raw: "{}" },
+              docker: { present: true, usable: true, version: "", compose: true, networks: [],
+                        containers: [{ name: "skynode-caddy", image: "caddy:2", state: "running", ports: "" }] } }),
+      classification({ regime: "skynode" })],
+  ] as const)("n'ajoute pas de violation regime pour une paire cohérente en régime %s", (_nom, f, c) => {
+    const p = plan({ regime: c.regime as never, empreinte_etat: computeFingerprint(f, c) })
+
+    expect(regles(p, f, c)).not.toContain("regime")
+  })
+
+  /**
+   * Un régime non exécutable correctement déclaré reste refusé — c'est le comportement
+   * voulu de la règle 5 (`!classification.executable`) — mais le nouveau contrôle ne
+   * doit pas y ajouter une seconde violation "regime" en double : la paire est cohérente,
+   * seule l'inexécutabilité justifie le refus.
+   */
+  it("n'ajoute pas de violation en double pour un régime non exécutable correctement déclaré", () => {
+    const f = facts({ listeners: [{ address: "0.0.0.0", port: 80, process: "nginx" }] })
+    const c = classification({ regime: "occupe", executable: false })
+    const p = plan({ regime: "occupe" as never, empreinte_etat: computeFingerprint(f, c) })
+
+    const v = validatePlan(p, f, c)
+    expect(v.ok).toBe(false)
+    if (v.ok) return
+    expect(v.violations.filter((x) => x.regle === "regime")).toHaveLength(1)
+  })
 })
 
 describe("validatePlan — correctif I5 : une étape malformée rend une violation, jamais une exception", () => {
