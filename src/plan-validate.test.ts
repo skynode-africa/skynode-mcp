@@ -404,3 +404,158 @@ describe("validatePlan — ce que le composeur produit passe toujours", () => {
     expect(validatePlan(result.plan, f, c)).toEqual({ ok: true })
   })
 })
+
+describe("validatePlan — correctif I1 : chaque type d'étape n'apparaît qu'une fois", () => {
+  it.each([
+    ["host.install_docker", [
+      { type: "host.install_docker" },
+      { type: "host.install_docker" },
+      { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+      { type: "app.run", port_interne: 3000, reseau: "skynode" },
+      { type: "state.record" },
+    ]],
+    ["app.run", [
+      { type: "host.install_docker" },
+      { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+      { type: "app.run", port_interne: 3000, reseau: "skynode" },
+      { type: "app.run", port_interne: 3001, reseau: "skynode" },
+      { type: "state.record" },
+    ]],
+    ["env.write", [
+      { type: "host.install_docker" },
+      { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+      { type: "env.write", depuis: ".env.production" },
+      { type: "env.write", depuis: ".env.local" },
+      { type: "app.run", port_interne: 3000, reseau: "skynode" },
+      { type: "state.record" },
+    ]],
+  ] as const)("refuse deux étapes %s", (_nom, etapes) => {
+    expect(regles(plan({ etapes: etapes as never }))).toContain("dependances")
+  })
+
+  /** Le cas trouvé en relecture : 29 répétitions du même type dans un seul plan. */
+  it("refuse 29 répétitions de host.install_docker", () => {
+    const etapes = Array.from({ length: 29 }, () => ({ type: "host.install_docker" }))
+
+    expect(regles(plan({ etapes: etapes as never }))).toContain("dependances")
+  })
+})
+
+describe("validatePlan — correctif I2 : les bornes du fichier d'échange", () => {
+  it.each([999999, -1] as const)("refuse swap_mo hors bornes (%d)", (swap) => {
+    const etapes = [
+      { type: "host.prepare", swap_mo: swap },
+      { type: "host.install_docker" },
+      { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+      { type: "app.run", port_interne: 3000, reseau: "skynode" },
+      { type: "state.record" },
+    ]
+
+    expect(regles(plan({ etapes: etapes as never }))).toContain("bornes")
+  })
+
+  it.each([0, 8192] as const)("accepte swap_mo aux bornes légitimes (%d)", (swap) => {
+    const etapes = [
+      { type: "host.prepare", swap_mo: swap },
+      { type: "host.install_docker" },
+      { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+      { type: "app.run", port_interne: 3000, reseau: "skynode" },
+      { type: "state.record" },
+    ]
+
+    expect(regles(plan({ etapes: etapes as never }))).not.toContain("bornes")
+  })
+})
+
+describe("validatePlan — correctif I3 : le refus par défaut", () => {
+  /**
+   * Ces deux entrées ne passent pas par `parsePlan` — c'est précisément le scénario que
+   * ce correctif protège : rien ne garantit qu'un appelant l'ait fait traverser avant
+   * `validatePlan`.
+   */
+  it("refuse un type d'étape hors du vocabulaire fermé", () => {
+    const etapes = [{ type: "shell.run" }]
+
+    expect(regles(plan({ etapes: etapes as never }))).toContain("dependances")
+  })
+
+  it("refuse un plan sans aucune étape", () => {
+    expect(regles(plan({ etapes: [] }))).toContain("dependances")
+  })
+})
+
+describe("validatePlan — correctif I4 : Docker présent mais inutilisable", () => {
+  const f = facts({
+    docker: { present: true, usable: false, version: "20.10", compose: false, containers: [], networks: [] },
+  })
+  const c = classification({ regime: "docker" })
+
+  it("refuse build.image quand le démon est arrêté", () => {
+    const p = plan({
+      regime: "docker",
+      empreinte_etat: computeFingerprint(f, c),
+      etapes: [
+        { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+        { type: "app.run", port_interne: 3000, reseau: "skynode" },
+        { type: "state.record" },
+      ] as never,
+    })
+
+    expect(regles(p, f, c)).toContain("dependances")
+  })
+
+  /** La réparation naturelle — réinstaller Docker — ne doit pas être bloquée. */
+  it("accepte host.install_docker sans contradiction", () => {
+    const p = plan({
+      regime: "docker",
+      empreinte_etat: computeFingerprint(f, c),
+      etapes: [
+        { type: "host.install_docker" },
+        { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+        { type: "app.run", port_interne: 3000, reseau: "skynode" },
+        { type: "state.record" },
+      ] as never,
+    })
+
+    expect(regles(p, f, c)).not.toContain("contradiction")
+  })
+})
+
+describe("validatePlan — cohérence entre les faits et la classification fournie", () => {
+  it("refuse une classification qui ne découle pas des faits constatés", () => {
+    const f = facts({ listeners: [{ address: "0.0.0.0", port: 80, process: "nginx" }] })
+    const c = classification({ regime: "vierge" })
+    const p = plan({ empreinte_etat: computeFingerprint(f, c) })
+
+    expect(regles(p, f, c)).toContain("regime")
+  })
+})
+
+describe("validatePlan — correctif I5 : une étape malformée rend une violation, jamais une exception", () => {
+  it("rend une violation quand la source de build.image est null", () => {
+    const etapes = [
+      { type: "host.install_docker" },
+      { type: "build.image", source: null, tag: "skynode/boutique" },
+      { type: "app.run", port_interne: 3000, reseau: "skynode" },
+      { type: "state.record" },
+    ]
+    const p = plan({ etapes: etapes as never })
+
+    expect(() => validatePlan(p, facts(), classification())).not.toThrow()
+    expect(regles(p)).toContain("bornes")
+  })
+
+  it("rend une violation quand env.write n'a pas de depuis", () => {
+    const etapes = [
+      { type: "host.install_docker" },
+      { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+      { type: "env.write" },
+      { type: "app.run", port_interne: 3000, reseau: "skynode" },
+      { type: "state.record" },
+    ]
+    const p = plan({ etapes: etapes as never })
+
+    expect(() => validatePlan(p, facts(), classification())).not.toThrow()
+    expect(regles(p)).toContain("bornes")
+  })
+})

@@ -1,7 +1,7 @@
 import { computeFingerprint } from "./fingerprint.js"
-import type { Plan } from "./plan-types.js"
+import type { Plan, PlanStep } from "./plan-types.js"
 import type { ServerFacts } from "./probe.js"
-import type { Classification } from "./regime.js"
+import { classify, type Classification } from "./regime.js"
 
 /**
  * Le périmètre de sécurité du produit (spec §6.1) : « Cette liste est le périmètre de
@@ -11,14 +11,18 @@ import type { Classification } from "./regime.js"
  * Rien ici ne suppose que le plan vient de `composePlan` : la spec §5.1 autorise
  * explicitement un agent à modifier les étapes et à resoumettre le plan sous le même
  * identifiant. Chaque contrôle est écrit pour un plan qu'on suppose hostile, jamais pour
- * celui, bien élevé, que composerait ce jalon.
+ * celui, bien élevé, que composerait ce jalon — jusqu'à la forme même des étapes : rien
+ * ne garantit ici qu'elles ont traversé `parsePlan` avant d'atteindre cette fonction,
+ * seulement que leur type TypeScript le prétend.
  */
 
 export interface Violation {
   /**
    * La règle enfreinte, telle que la spec §6.1 les numérote. La règle 1 — le schéma —
-   * n'y figure pas : `parsePlan` l'a déjà tranchée, et rien ne parvient ici sans être
-   * passé par elle.
+   * n'y figure pas : `parsePlan` l'a déjà tranchée dans le chemin normal. Mais rien ne
+   * force un appelant à passer par elle avant d'atteindre `validatePlan` — c'est
+   * pourquoi un type d'étape hors du vocabulaire fermé, ou une étape mal formée, se
+   * refusent quand même ici, sous la règle `dependances` ou `bornes` selon le cas.
    */
   regle: "empreinte" | "dependances" | "contradiction" | "regime" | "bornes"
   /** Ce qui ne va pas, en français, adressé à un agent qui doit corriger. */
@@ -40,6 +44,11 @@ const TAG_PATTERN = /^skynode\/[a-z][a-z0-9-]{0,31}$/
 
 /** Un chemin relatif qui ne remonte jamais. */
 const PATH_PATTERN = /^(\.|[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*)$/
+
+/** Même plage que `HostPrepare.swap_mo` (`plan-types.ts`), revérifiée ici pour un plan
+ * qui n'aurait pas traversé `parsePlan` : `fallocate -l 999999M` remplit un disque de VPS. */
+const SWAP_MO_MIN = 0
+const SWAP_MO_MAX = 8192
 
 /**
  * Repris de `fingerprint.ts`, qui ne l'exporte pas : le nom que prend le conteneur Caddy
@@ -71,6 +80,13 @@ function pathEscapes(path: string): boolean {
   if (path.startsWith("/")) return true
   if (path.split("/").includes("..")) return true
   return !PATH_PATTERN.test(path)
+}
+
+/** Le `type` d'une valeur quelconque tirée de `etapes`, sans supposer sa forme. */
+function stepTypeOf(raw: unknown): string | null {
+  if (raw === null || typeof raw !== "object") return null
+  const type = (raw as { type?: unknown }).type
+  return typeof type === "string" ? type : null
 }
 
 /**
@@ -110,27 +126,121 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
     })
   }
 
-  // Règles 3, 4 et 6 — dépendances, contradictions et bornes : un seul passage sur les
-  // étapes. Le graphe de dépendances est tenu ici, pas déduit de l'ordre proposé.
-  let dockerAvailable = facts.docker.present
+  /*
+    La classification reçue est un argument comme un autre, pas une vérité qu'on
+    suppose dérivée des faits qui l'accompagnent : rien n'empêche un appelant futur
+    (jalon 3b, tâche 7, pas encore écrite) de rompre cette discipline et de présenter
+    une machine occupée ou sans accès comme vierge et exécutable. `classify()`
+    (`regime.ts`) est la seule source de vérité sur ce que ces faits impliquent ; on la
+    rappelle ici plutôt que de faire confiance à l'appariement fourni.
+  */
+  const regimeReel = classify(facts).regime
+  if (regimeReel !== classification.regime) {
+    violations.push({
+      regle: "regime",
+      message:
+        `La classification fournie ("${classification.regime}") ne découle pas des faits ` +
+        `constatés, qui donnent le régime "${regimeReel}" : cet appariement ne peut pas venir ` +
+        "d'un constat cohérent de la machine.",
+    })
+  }
+
+  // Règles 1 (forme), 3, 4 et 6 — dépendances, contradictions et bornes : un seul passage
+  // sur les étapes. Le graphe de dépendances est tenu ici, pas déduit de l'ordre proposé.
+  const rawEtapes: unknown = plan.etapes
+
+  if (!Array.isArray(rawEtapes)) {
+    violations.push({
+      regle: "dependances",
+      message:
+        "« etapes » n'est pas une liste exploitable : un plan sans étapes bien formées " +
+        "n'a rien à appliquer.",
+    })
+    return { ok: false, violations }
+  }
+
+  if (rawEtapes.length === 0) {
+    violations.push({
+      regle: "dependances",
+      message: "le plan ne contient aucune étape : il n'y a rien à appliquer.",
+    })
+  }
+
+  // Chaque type n'apparaît qu'une fois : au jalon suivant, ce sont des commandes root
+  // rejouées sur la machine d'un client — un `host.install_docker` répété relance
+  // l'installation, un second `app.run` écraserait le conteneur du premier.
+  const indicesParType = new Map<string, number[]>()
+  rawEtapes.forEach((raw, index) => {
+    const type = stepTypeOf(raw)
+    if (type === null) return
+    const indices = indicesParType.get(type) ?? []
+    indices.push(index)
+    indicesParType.set(type, indices)
+  })
+  for (const [type, indices] of indicesParType) {
+    if (indices.length > 1) {
+      violations.push({
+        regle: "dependances",
+        message:
+          `le type d'étape "${type}" apparaît ${indices.length} fois (index ${indices.join(", ")}) ` +
+          " : chaque type ne peut figurer qu'une seule fois dans un plan.",
+      })
+    }
+  }
+
+  // Docker « présent mais inutilisable » (démon arrêté, utilisateur hors du groupe) n'est
+  // pas Docker disponible : `classify()` distingue déjà les deux (`regime.ts`, blockers).
+  let dockerAvailable = facts.docker.present && facts.docker.usable
   let caddyAvailable = caddyAlreadyPresent(facts)
   let buildImageSeen = false
   let appRunSeen = false
-  const lastIndex = plan.etapes.length - 1
+  const lastIndex = rawEtapes.length - 1
 
-  plan.etapes.forEach((etape, index) => {
+  rawEtapes.forEach((raw, index) => {
+    const type = stepTypeOf(raw)
+
+    // Ni un objet, ni un `type` en chaîne : ce n'est l'étape d'aucun vocabulaire, connu
+    // ou non. `parsePlan` l'aurait déjà rejeté ; rien ne garantit qu'il est passé par là.
+    if (type === null) {
+      violations.push({
+        regle: "dependances",
+        etape: index,
+        message: `étape ${index} : ne correspond à aucune étape reconnaissable — ni objet, ni type déclaré.`,
+      })
+      return
+    }
+
+    const etape = raw as PlanStep
+
     switch (etape.type) {
-      case "host.prepare":
+      case "host.prepare": {
+        const swap: unknown = etape.swap_mo
+        if (
+          typeof swap !== "number" ||
+          !Number.isInteger(swap) ||
+          swap < SWAP_MO_MIN ||
+          swap > SWAP_MO_MAX
+        ) {
+          violations.push({
+            regle: "bornes",
+            etape: index,
+            message:
+              `étape ${index} (host.prepare) : le fichier d'échange demandé (${String(swap)} Mio) ` +
+              `est hors de la plage ${SWAP_MO_MIN}-${SWAP_MO_MAX}.`,
+          })
+        }
         break
+      }
 
       case "host.install_docker":
-        if (facts.docker.present) {
+        if (dockerAvailable) {
           violations.push({
             regle: "contradiction",
             etape: index,
             message:
               `étape ${index} (host.install_docker) contredit l'état constaté : Docker est déjà ` +
-              "installé sur cette machine — cette étape est inutile et modifierait une installation existante.",
+              "installé et utilisable sur cette machine — cette étape est inutile et modifierait " +
+              "une installation existante.",
           })
         }
         dockerAvailable = true
@@ -143,7 +253,7 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
             etape: index,
             message:
               `étape ${index} (proxy.caddy.install) exige Docker disponible avant elle : ni ` +
-              "host.install_docker plus haut dans le plan, ni Docker déjà présent sur la machine.",
+              "host.install_docker plus haut dans le plan, ni Docker déjà présent et utilisable sur la machine.",
           })
         }
         const held = publicListener(facts)
@@ -163,38 +273,61 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
       case "build.generate_dockerfile":
         break
 
-      case "build.image":
+      case "build.image": {
         if (!dockerAvailable) {
           violations.push({
             regle: "dependances",
             etape: index,
             message:
               `étape ${index} (build.image) exige Docker disponible avant elle : ni ` +
-              "host.install_docker plus haut dans le plan, ni Docker déjà présent sur la machine.",
+              "host.install_docker plus haut dans le plan, ni Docker déjà présent et utilisable sur la machine.",
           })
         }
-        if (pathEscapes(etape.source.path)) {
+
+        const source: unknown = etape.source
+        const path =
+          source !== null && typeof source === "object" && typeof (source as { path?: unknown }).path === "string"
+            ? (source as { path: string }).path
+            : null
+
+        if (path === null) {
+          violations.push({
+            regle: "bornes",
+            etape: index,
+            message: `étape ${index} (build.image) : la source de construction est absente ou mal formée.`,
+          })
+        } else if (pathEscapes(path)) {
           violations.push({
             regle: "bornes",
             etape: index,
             message:
-              `étape ${index} (build.image) : le chemin "${etape.source.path}" échappe à la racine ` +
-              'du projet — un chemin absolu ou un segment ".." n\'est jamais accepté.',
+              `étape ${index} (build.image) : le chemin "${path}" échappe à la racine du projet — ` +
+              'un chemin absolu ou un segment ".." n\'est jamais accepté.',
           })
         }
-        if (!TAG_PATTERN.test(etape.tag)) {
+
+        const tag: unknown = etape.tag
+        if (typeof tag !== "string") {
+          violations.push({
+            regle: "bornes",
+            etape: index,
+            message: `étape ${index} (build.image) : l'étiquette d'image est absente ou mal formée.`,
+          })
+        } else if (!TAG_PATTERN.test(tag)) {
           violations.push({
             regle: "bornes",
             etape: index,
             message:
-              `étape ${index} (build.image) : l'étiquette "${etape.tag}" est hors du périmètre ` +
-              'autorisé — seules les images "skynode/…" en minuscules sont permises, aucun registre tiers.',
+              `étape ${index} (build.image) : l'étiquette "${tag}" est hors du périmètre autorisé — ` +
+              'seules les images "skynode/…" en minuscules sont permises, aucun registre tiers.',
           })
         }
+
         buildImageSeen = true
         break
+      }
 
-      case "env.write":
+      case "env.write": {
         if (appRunSeen) {
           violations.push({
             regle: "dependances",
@@ -204,18 +337,27 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
               "avoir démarré le conteneur n'aurait aucun effet sur celui-ci.",
           })
         }
-        if (pathEscapes(etape.depuis)) {
+
+        const depuis: unknown = etape.depuis
+        if (typeof depuis !== "string") {
+          violations.push({
+            regle: "bornes",
+            etape: index,
+            message: `étape ${index} (env.write) : le fichier source est absent ou mal formé.`,
+          })
+        } else if (pathEscapes(depuis)) {
           violations.push({
             regle: "bornes",
             etape: index,
             message:
-              `étape ${index} (env.write) : le fichier "${etape.depuis}" échappe à la racine du ` +
-              'projet — un chemin absolu ou un segment ".." n\'est jamais accepté.',
+              `étape ${index} (env.write) : le fichier "${depuis}" échappe à la racine du projet — ` +
+              'un chemin absolu ou un segment ".." n\'est jamais accepté.',
           })
         }
         break
+      }
 
-      case "app.run":
+      case "app.run": {
         if (!buildImageSeen) {
           violations.push({
             regle: "dependances",
@@ -225,37 +367,47 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
               "il n'y a pas d'image construite à démarrer.",
           })
         }
-        if (!Number.isInteger(etape.port_interne) || etape.port_interne < 1 || etape.port_interne > 65535) {
+
+        const port: unknown = etape.port_interne
+        if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
           violations.push({
             regle: "bornes",
             etape: index,
-            message: `étape ${index} (app.run) : le port ${etape.port_interne} est hors de la plage 1-65535.`,
+            message: `étape ${index} (app.run) : le port (${String(port)}) est hors de la plage 1-65535.`,
           })
         }
-        if (etape.reseau !== ALLOWED_NETWORK) {
-          if (etape.reseau === "host") {
-            violations.push({
-              regle: "bornes",
-              etape: index,
-              message:
-                `étape ${index} (app.run) : le réseau "host" donnerait au conteneur la pile ` +
-                "réseau de la machine — l'accès à tout ce qui écoute sur la boucle locale, la " +
-                'base de données d\'un autre client comprise. Seul le réseau "skynode" est autorisé.',
-            })
-          } else {
-            violations.push({
-              regle: "bornes",
-              etape: index,
-              message:
-                `étape ${index} (app.run) : le réseau "${etape.reseau}" n'est pas autorisé — seul ` +
-                'le réseau "skynode" peut être utilisé.',
-            })
-          }
+
+        const reseau: unknown = etape.reseau
+        if (typeof reseau !== "string") {
+          violations.push({
+            regle: "bornes",
+            etape: index,
+            message: `étape ${index} (app.run) : le réseau est absent ou mal formé.`,
+          })
+        } else if (reseau === "host") {
+          violations.push({
+            regle: "bornes",
+            etape: index,
+            message:
+              `étape ${index} (app.run) : le réseau "host" donnerait au conteneur la pile ` +
+              "réseau de la machine — l'accès à tout ce qui écoute sur la boucle locale, la " +
+              'base de données d\'un autre client comprise. Seul le réseau "skynode" est autorisé.',
+          })
+        } else if (reseau !== ALLOWED_NETWORK) {
+          violations.push({
+            regle: "bornes",
+            etape: index,
+            message:
+              `étape ${index} (app.run) : le réseau "${reseau}" n'est pas autorisé — seul le ` +
+              'réseau "skynode" peut être utilisé.',
+          })
         }
+
         appRunSeen = true
         break
+      }
 
-      case "proxy.caddy.site":
+      case "proxy.caddy.site": {
         if (!caddyAvailable) {
           violations.push({
             regle: "dependances",
@@ -274,16 +426,19 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
               "plan : il n'y a rien à publier.",
           })
         }
-        if (!DOMAIN_PATTERN.test(etape.domaine)) {
+
+        const domaine: unknown = etape.domaine
+        if (typeof domaine !== "string" || !DOMAIN_PATTERN.test(domaine)) {
           violations.push({
             regle: "bornes",
             etape: index,
             message:
-              `étape ${index} (proxy.caddy.site) : "${etape.domaine}" n'est pas un nom de domaine ` +
+              `étape ${index} (proxy.caddy.site) : "${String(domaine)}" n'est pas un nom de domaine ` +
               "valide — un nom d'hôte simple est attendu, sans schéma, sans chemin et sans port.",
           })
         }
         break
+      }
 
       case "state.record":
         if (index !== lastIndex) {
@@ -303,6 +458,16 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
           })
         }
         break
+
+      // Aucun des neuf types connus : le vocabulaire fermé du jalon (`plan-types.ts`)
+      // n'admet que ceux-ci. `parsePlan` l'aurait refusé dans le chemin normal ; ici, un
+      // type inconnu se refuse quand même, plutôt que de traverser en silence.
+      default:
+        violations.push({
+          regle: "dependances",
+          etape: index,
+          message: `étape ${index} : type d'étape inconnu ("${type}") — hors du vocabulaire fermé.`,
+        })
     }
   })
 
