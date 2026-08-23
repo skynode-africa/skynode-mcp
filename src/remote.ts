@@ -192,6 +192,16 @@ export function writeFileScript(path: string, content: string, mode: string): st
   // a pas en réclame un — au prix, dans ce seul cas, d'un octet que le heredoc ne peut pas
   // éviter d'ajouter : sans lui, le délimiteur se collerait à la dernière ligne du contenu
   // et ne serait plus reconnu comme tel.
+  // Un octet nul ne traverse pas un heredoc : `sh` le laisse tomber en silence, et le
+  // fichier écrit diffère de celui demandé — treize octets réclamés, douze posés, sur un
+  // fichier qui peut porter des secrets. Refuser vaut mieux qu'écrire à côté.
+  if (content.includes("\0")) {
+    throw new Error(
+      "Le contenu à écrire porte un octet nul, qu'un heredoc ne peut pas transporter : " +
+        "le fichier écrit différerait silencieusement de celui demandé."
+    )
+  }
+
   const separator = content === "" || content.endsWith("\n") ? "" : "\n"
 
   return (
@@ -234,7 +244,17 @@ export function removeMarkerBlockScript(path: string, marker: string): string {
     // Jamais `sed -i` : sa syntaxe diverge entre GNU (en place directement) et BSD (un
     // suffixe de sauvegarde est obligatoire) — un fichier temporaire suivi d'un `mv` est la
     // seule forme qui se comporte pareil partout, y compris sur la machine d'un développeur.
+    // `mv` ne remplace pas le contenu de l'inode visé : il y met le fichier temporaire,
+    // avec SA métadonnée. Un Caddyfile `caddy:caddy 640` deviendrait `root:root 644`, et
+    // sous un umask permissif un `600` deviendrait `666` — une configuration rendue
+    // inscriptible par tout le monde, sans que rien ne le signale. On relève donc les trois
+    // valeurs avant, et on les repose après.
+    `    meta=$(stat -c '%u %g %a' ${shellQuote(path)} 2>/dev/null || echo '')`,
     `    sed '/^${sedPattern(start)}$/,/^${sedPattern(end)}$/d' ${shellQuote(path)} > ${shellQuote(tmp)} && mv ${shellQuote(tmp)} ${shellQuote(path)}`,
+    `    if [ -n "$meta" ]; then`,
+    `      chown "$(echo "$meta" | cut -d' ' -f1):$(echo "$meta" | cut -d' ' -f2)" ${shellQuote(path)} 2>/dev/null || true`,
+    `      chmod "$(echo "$meta" | cut -d' ' -f3)" ${shellQuote(path)}`,
+    `    fi`,
     `  fi`,
     `fi`,
   ].join("\n")

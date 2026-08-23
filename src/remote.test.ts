@@ -384,3 +384,51 @@ describe("runRemote > diagnostic (mineurs)", () => {
     expect(r.diagnostic).toContain("applied\nerreur distincte")
   })
 })
+
+describe("la métadonnée du fichier survit au remplacement", () => {
+  /**
+   * `mv` ne remplace pas le contenu de l'inode visé : il y met le fichier temporaire, avec
+   * sa métadonnée à lui. Sans relevé préalable, un Caddyfile `caddy:caddy 640` deviendrait
+   * `root:root 644` — et sous un umask permissif, un `600` deviendrait `666`, donc une
+   * configuration inscriptible par tout le monde, sans que rien ne le signale.
+   */
+  it("relève propriétaire, groupe et mode avant de remplacer", () => {
+    const s = removeMarkerBlockScript("/etc/caddy/Caddyfile", "skynode")
+
+    expect(s).toMatch(/stat -c '%u %g %a'/)
+    expect(s.indexOf("stat -c")).toBeLessThan(s.indexOf("skynode-tmp"))
+  })
+
+  it("repose les trois valeurs après le remplacement", () => {
+    const s = removeMarkerBlockScript("/etc/caddy/Caddyfile", "skynode")
+
+    expect(s).toMatch(/chown /)
+    expect(s).toMatch(/chmod /)
+    expect(s.indexOf("mv ")).toBeLessThan(s.indexOf("chown "))
+  })
+
+  /** Un fichier absent n'a pas de métadonnée à préserver : la repose ne doit pas s'exécuter. */
+  it("ne repose rien quand il n'y avait pas de fichier", () => {
+    expect(removeMarkerBlockScript("/etc/caddy/Caddyfile", "skynode")).toMatch(/if \[ -n "\$meta" \]/)
+  })
+
+  it("pose le bloc en préservant la métadonnée, puisqu'il retire d'abord", () => {
+    expect(markerBlockScript("/etc/caddy/Caddyfile", "skynode", "import x")).toMatch(/stat -c '%u %g %a'/)
+  })
+})
+
+describe("writeFileScript refuse un contenu qu'un heredoc ne transporte pas", () => {
+  /**
+   * `sh` laisse tomber l'octet nul en silence : treize octets réclamés, douze posés — sur
+   * un fichier qui peut porter des secrets, et en root. Refuser vaut mieux qu'écrire à côté.
+   */
+  it("refuse un octet nul dans le contenu", () => {
+    const contenu = "avant" + String.fromCharCode(0) + "après\n"
+
+    expect(() => writeFileScript("/etc/skynode/apps/x.env", contenu, "0600")).toThrow(/octet nul/i)
+  })
+
+  it("accepte un contenu ordinaire, accents et CRLF compris", () => {
+    expect(() => writeFileScript("/etc/skynode/apps/x.env", "A=é\r\nB=2\n", "0600")).not.toThrow()
+  })
+})
