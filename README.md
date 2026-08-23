@@ -78,27 +78,30 @@ rien.
 ## Prérequis SSH
 
 `inspect_server` s'appuie sur le client `ssh` du système, pas sur une bibliothèque
-embarquée.
+embarquée. **`plan_deployment` ouvre la même session** : il rejoue exactement la même
+sonde que `inspect_server` avant de composer un plan — les prérequis ci-dessous
+s'appliquent aux deux.
 
 - Le client `ssh` du système est requis. **Sous Windows, passez par WSL** — le paquet
   suppose la présence de `ssh` et de `tar`.
 - **La clé doit déjà être autorisée sur le serveur.** SkyNode n'en détient aucune et
   n'en installe aucune : c'est le corollaire direct de la promesse « ce que SkyNode ne
   voit pas » ci-dessous.
-- `inspect_server` **ne modifie rien** : ni installation, ni écriture, ni
-  configuration.
+- `inspect_server` et `plan_deployment` **ne modifient rien** : ni installation, ni
+  écriture, ni configuration.
 - **Une trace, une seule** : la sonde exécute `sudo -n true` pour savoir si
   l'élévation est possible. Hors `sudoers`, le réglage `mail_no_user` par défaut de
   sudo écrit une ligne dans `auth.log` et envoie un courriel à root. Rien n'est
   modifié — mais si vous retrouvez cette ligne dans vos journaux, c'est bien
-  `inspect_server` qui l'a laissée.
+  `inspect_server` ou `plan_deployment` qui l'a laissée.
 
 ## Ce que SkyNode ne voit pas
 
 Ce serveur tourne sur votre machine. SkyNode ne reçoit que les appels d'API classiques
 de votre compte — les mêmes que ceux de votre espace client. La session SSH ouverte par
-`inspect_server` part elle aussi de votre machine : ni la clé privée, ni la sortie de la
-sonde ne transitent par l'infrastructure SkyNode.
+`inspect_server`, ou par `plan_deployment` lorsqu'il constate le serveur avant de
+composer un plan, part elle aussi de votre machine : ni la clé privée, ni la sortie de
+la sonde ne transitent par l'infrastructure SkyNode.
 
 ## Développement
 

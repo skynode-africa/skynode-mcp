@@ -1,5 +1,11 @@
 import { computeFingerprint } from "./fingerprint.js"
 import type { Plan, PlanStep } from "./plan-types.js"
+import {
+  ALLOWED_NETWORK,
+  CADDY_CONTAINER,
+  DOMAIN_PATTERN,
+  pathEscapes,
+} from "./plan-rules.js"
 import type { ServerFacts } from "./probe.js"
 import { classify, type Classification } from "./regime.js"
 
@@ -36,28 +42,13 @@ export interface Violation {
 
 export type Validation = { ok: true } | { ok: false; violations: Violation[] }
 
-/** Le nôtre, et rien d'autre. `host` donnerait au conteneur la pile réseau de la machine. */
-const ALLOWED_NETWORK = "skynode"
-
-/** Un nom d'hôte, sans schéma, sans chemin, sans port. */
-const DOMAIN_PATTERN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/
-
 /** Nos images seulement : ni registre tiers, ni chemin arbitraire. */
 const TAG_PATTERN = /^skynode\/[a-z][a-z0-9-]{0,31}$/
-
-/** Un chemin relatif qui ne remonte jamais. */
-const PATH_PATTERN = /^(\.|[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*)$/
 
 /** Même plage que `HostPrepare.swap_mo` (`plan-types.ts`), revérifiée ici pour un plan
  * qui n'aurait pas traversé `parsePlan` : `fallocate -l 999999M` remplit un disque de VPS. */
 const SWAP_MO_MIN = 0
 const SWAP_MO_MAX = 8192
-
-/**
- * Repris de `fingerprint.ts`, qui ne l'exporte pas : le nom que prend le conteneur Caddy
- * quand c'est SkyNode qui l'a posé.
- */
-const CADDY_CONTAINER = "skynode-caddy"
 
 /**
  * Repris de `regime.ts`, qui ne l'exporte pas : une écoute sur ces adresses ne tient pas
@@ -72,17 +63,6 @@ function caddyAlreadyPresent(facts: ServerFacts): boolean {
 /** Le port public déjà tenu par un tiers, ou `undefined` si rien ne le tient hors boucle locale. */
 function publicListener(facts: ServerFacts): ServerFacts["listeners"][number] | undefined {
   return facts.listeners.find((l) => (l.port === 80 || l.port === 443) && !LOOPBACK.has(l.address))
-}
-
-/**
- * Un chemin est refusé s'il est absolu, s'il contient un segment `..`, ou s'il ne
- * correspond pas à `PATH_PATTERN` — les trois contrôles, pas seulement le motif : un
- * motif seul se contourne par encodage.
- */
-function pathEscapes(path: string): boolean {
-  if (path.startsWith("/")) return true
-  if (path.split("/").includes("..")) return true
-  return !PATH_PATTERN.test(path)
 }
 
 /** Le `type` d'une valeur quelconque tirée de `etapes`, sans supposer sa forme. */

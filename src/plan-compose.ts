@@ -4,6 +4,7 @@ import type { Instance } from "./api.js"
 import { pickTemplate } from "./dockerfile.js"
 import { computeFingerprint } from "./fingerprint.js"
 import type { Plan, PlanStep } from "./plan-types.js"
+import { ALLOWED_NETWORK, APPLICATION_PATTERN, CADDY_CONTAINER, DOMAIN_PATTERN, pathEscapes } from "./plan-rules.js"
 import type { ProjectFacts } from "./project-analyze.js"
 import type { ServerFacts } from "./probe.js"
 import type { Classification } from "./regime.js"
@@ -27,21 +28,6 @@ export interface ComposeOptions {
 
 export type ComposeResult = { ok: true; plan: Plan } | { ok: false; because: string; guidance: string[] }
 
-/** Même règle que `PlanSchema.application` (`plan-types.ts`) : la reproduire ici évite un
- * plan qui échouerait sa propre validation après coup, pour une raison que ce module
- * aurait pu écarter avant même de composer quoi que ce soit. */
-const APPLICATION_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
-
-/** Une étiquette DNS : lettres, chiffres, tiret interne, jamais en tête ni en queue. */
-const DOMAIN_LABEL_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i
-
-/** Le réseau Docker que `proxy.caddy.install` crée. Le seul que `app.run` utilise —
- * jamais `host`, qui donnerait au conteneur la pile réseau de la machine. */
-const APP_NETWORK = "skynode"
-
-/** Nom du conteneur posé par `proxy.caddy.install`, repris tel quel de `fingerprint.ts`. */
-const CADDY_CONTAINER = "skynode-caddy"
-
 /**
  * `staticSite()` (`dockerfile.ts`) n'utilise jamais `params.version` — le gabarit sert
  * des fichiers déjà construits, sans étape de compilation à étiqueter. Mais
@@ -51,16 +37,6 @@ const CADDY_CONTAINER = "skynode-caddy"
  * a pas — juste une valeur qui satisfait un champ que le schéma exige de toute façon.
  */
 const STATIC_PLACEHOLDER_VERSION = "1"
-
-/** Un domaine simple : au moins deux étiquettes, aucun schéma, aucun chemin. */
-function isValidDomain(domaine: string): boolean {
-  if (domaine.length === 0 || domaine.length > 253) return false
-
-  const labels = domaine.split(".")
-  if (labels.length < 2) return false
-
-  return labels.every((label) => DOMAIN_LABEL_PATTERN.test(label))
-}
 
 function refuse(because: string, guidance: string[]): ComposeResult {
   return { ok: false, because, guidance }
@@ -91,9 +67,26 @@ export function composePlan(
     )
   }
 
-  if (options.domaine !== undefined && !isValidDomain(options.domaine)) {
+  // Motif du validateur (`plan-rules.ts`) : minuscules seules, dernière étiquette
+  // purement alphabétique. Le composeur doit refuser lui-même ce que le validateur
+  // refuserait de toute façon — sinon un domaine en majuscules ou à TLD numérique
+  // franchit la composition et échoue plus loin, avec un message qui accuse SkyNode
+  // au lieu du domaine.
+  if (options.domaine !== undefined && !DOMAIN_PATTERN.test(options.domaine)) {
     return refuse(`« ${options.domaine} » n'est pas un nom de domaine valide.`, [
-      "Indiquez un domaine simple, par exemple « boutique.exemple.ci », sans schéma ni chemin.",
+      "Indiquez un domaine simple, en minuscules, par exemple « boutique.exemple.ci », sans " +
+        "schéma ni chemin.",
+    ])
+  }
+
+  // Même motif que `build.image.source.path` et `env.write.depuis` côté validateur
+  // (`plan-rules.ts`) : un chemin absolu, un segment « .. », un espace ou un saut de
+  // ligne échoueraient la validation après coup — le refuser ici, avant même de
+  // composer quoi que ce soit, avec un message qui parle du chemin, pas de SkyNode.
+  if (options.envFile !== undefined && pathEscapes(options.envFile)) {
+    return refuse(`« ${options.envFile} » n'est pas un chemin de fichier valide.`, [
+      "Indiquez un chemin relatif à la racine du projet, sans chemin absolu ni segment « .. », " +
+        "sans espace ni saut de ligne — par exemple « .env » ou « config/.env.production ».",
     ])
   }
 
@@ -103,21 +96,46 @@ export function composePlan(
     return refuse(classification.because, classification.guidance)
   }
 
-  // `app.run` en a besoin quel que soit le chemin choisi ensuite (Dockerfile fourni ou
-  // généré) : un seul contrôle, commun aux deux, plutôt que répété dans chaque branche.
-  if (project.port.value === null) {
-    return refuse(`Le port d'écoute de l'application n'a pas pu être déduit (${project.port.source}).`, [
-      "Indiquez le port sur lequel l'application écoute (variable PORT dans le code, ou EXPOSE " +
-        "dans un Dockerfile), puis relancez inspect_project.",
-    ])
+  // Axe B de la jointure composeur/validateur : `classify()` accorde `executable: true`
+  // à des états où Docker existe mais ne peut pas servir à construire une image — un
+  // démon arrêté, un utilisateur hors du groupe `docker`. Aucune étape du vocabulaire
+  // ne répare un démon injoignable : le plan doit refuser ici, avec le blocage que
+  // `classify()` a déjà formulé (`regime.ts`), plutôt que composer une suite d'étapes
+  // que `validatePlan` rejettera de toute façon.
+  if (server.docker.present && !server.docker.usable) {
+    const blocage = classification.blockers.find((b) => b.includes("démon Docker"))
+    return refuse(
+      blocage ?? "Le démon Docker n'est pas joignable sur cette machine : aucune image ne peut y être construite.",
+      [
+        "Vérifiez que le service Docker tourne sur la machine (`systemctl status docker`) et que " +
+          "l'utilisateur SSH appartient au groupe `docker`.",
+        "Relancez inspect_server une fois corrigé, puis recomposez le plan.",
+      ]
+    )
   }
-  const port = project.port.value
+
+  // Un état SkyNode existant (`skynode.present`) suppose une machine déjà équipée — mais
+  // rien n'empêche Docker d'avoir disparu depuis (désinstallation manuelle). `classify()`
+  // ne le détecte pas comme un blocage (il ne teste que « présent mais inutilisable ») :
+  // ce contrôle est propre au composeur, qui a besoin de Docker pour construire l'image.
+  if (classification.regime === "skynode" && !server.docker.present) {
+    return refuse(
+      "Docker n'est pas installé sur cette machine, alors qu'elle porte déjà un état SkyNode " +
+        "(/etc/skynode/state.json) : c'est un état incohérent, aucune image ne peut y être construite.",
+      [
+        "Vérifiez l'état de la machine directement : Docker a pu être désinstallé après le premier " +
+          "déploiement SkyNode.",
+        "Réinstallez Docker à la main, puis relancez inspect_server.",
+      ]
+    )
+  }
 
   // Le dépôt qui se déclare l'emporte sur toute déduction (spec §5.3) : un Dockerfile
   // fourni saute directement à `build.image`, sans étape de génération.
   const dockerfileProvided = project.declared.dockerfiles.length > 0
 
   let generatedStep: Extract<PlanStep, { type: "build.generate_dockerfile" }> | null = null
+  let port: number
 
   if (!dockerfileProvided) {
     if (project.declared.composeFiles.length > 0) {
@@ -146,6 +164,17 @@ export function composePlan(
         ]
       )
     }
+
+    // Testé après le gabarit, pas avant (spec §5.3) : un dépôt sans gabarit disponible
+    // doit être refusé pour ce motif immédiatement, pas pour un port manquant qu'ajouter
+    // ne ferait que révéler l'absence de gabarit à la relance suivante.
+    if (project.port.value === null) {
+      return refuse(`Le port d'écoute de l'application n'a pas pu être déduit (${project.port.source}).`, [
+        "Indiquez le port sur lequel l'application écoute (variable PORT dans le code, ou EXPOSE " +
+          "dans un Dockerfile), puis relancez inspect_project.",
+      ])
+    }
+    port = project.port.value
 
     // `pickTemplate` ne rend une sortie non nulle que pour ces trois familles : la même
     // liste que `BuildGenerateDockerfile.famille` (`plan-types.ts`), pas une coïncidence.
@@ -177,13 +206,27 @@ export function composePlan(
       sortie,
       port,
     }
+  } else {
+    // Aucun gabarit à choisir ici : le Dockerfile fourni fait foi, seul le port reste à
+    // connaître pour `app.run`.
+    if (project.port.value === null) {
+      return refuse(`Le port d'écoute de l'application n'a pas pu être déduit (${project.port.source}).`, [
+        "Indiquez le port sur lequel l'application écoute (variable PORT dans le code, ou EXPOSE " +
+          "dans un Dockerfile), puis relancez inspect_project.",
+      ])
+    }
+    port = project.port.value
   }
 
   // Régime vierge → les étapes d'équipement précèdent. Régime docker → on s'installe sur
-  // le Docker existant, on n'en réinstalle pas. Régime skynode → rien d'autre que
-  // construire, démarrer, router (spec §5.3, §5.5) : la machine est déjà équipée, et
-  // Caddy y tourne déjà sous le nom que `proxy.caddy.install` lui aurait donné.
+  // le Docker existant, on n'en réinstalle pas. Régime skynode → construire, démarrer,
+  // router (spec §5.3, §5.5) : la machine est déjà équipée — sauf le cas où le conteneur
+  // Caddy qu'un premier déploiement SkyNode y avait posé a été supprimé depuis. Ce cas se
+  // répare : une étape d'équipement suffit, pas un refus (axe B de la jointure
+  // composeur/validateur). `host.prepare` et `host.install_docker` restent hors de ce
+  // régime : Docker, lui, est requis en amont (contrôlé plus haut) et ne se réinstalle pas.
   const etapes: PlanStep[] = []
+  const caddyMissing = !caddyAlreadyInstalled(server)
 
   if (classification.regime !== "skynode") {
     etapes.push({ type: "host.prepare", swap_mo: swapMo(server) })
@@ -191,10 +234,10 @@ export function composePlan(
     if (classification.regime === "vierge") {
       etapes.push({ type: "host.install_docker" })
     }
+  }
 
-    if (!caddyAlreadyInstalled(server)) {
-      etapes.push({ type: "proxy.caddy.install" })
-    }
+  if (caddyMissing) {
+    etapes.push({ type: "proxy.caddy.install" })
   }
 
   if (generatedStep) etapes.push(generatedStep)
@@ -205,16 +248,16 @@ export function composePlan(
     tag: `skynode/${options.application}`,
   })
 
-  // Aucune validation de chemin ici (`../../root/.ssh/id_rsa`, une absolue, un saut de
-  // ligne) : ce module compose une proposition, il ne juge pas de la sûreté d'un chemin
-  // contre l'état réel de la machine cible. C'est `apply_plan` (spec §6.1.6, tâche 5) qui
-  // revalide `depuis` avant toute écriture — un contrôle ici serait un second avis sur une
-  // question que ce module n'a pas les moyens de trancher correctement.
+  // `options.envFile` a déjà passé `pathEscapes()` à l'entrée de cette fonction, sur le
+  // même motif que `plan-validate.ts`. C'est `apply_plan` (spec §6.1.6, tâche 5) qui
+  // revalide `depuis` avant toute écriture — un plan peut être modifié et resoumis entre
+  // les deux (spec §5.1) — mais rien ici ne compose plus un chemin que le validateur
+  // refuserait.
   if (options.envFile !== undefined) {
     etapes.push({ type: "env.write", depuis: options.envFile })
   }
 
-  etapes.push({ type: "app.run", port_interne: port, reseau: APP_NETWORK })
+  etapes.push({ type: "app.run", port_interne: port, reseau: ALLOWED_NETWORK })
 
   if (options.domaine !== undefined) {
     etapes.push({ type: "proxy.caddy.site", domaine: options.domaine })
@@ -225,7 +268,12 @@ export function composePlan(
   const empreinte_etat = computeFingerprint(server, classification)
   const id = derivePlanId(empreinte_etat, options.application, etapes)
 
-  const horsPerimetre = ["aucune sauvegarde n'est configurée"]
+  // `classification.blockers` (`regime.ts`) signale ce qui gênerait un déploiement même
+  // en régime exécutable — un disque plein, une mémoire trop courte pour une construction
+  // Docker. `plan-render.ts` pose l'invariant : le développeur n'approuve que ce texte,
+  // rien d'autre. Un plan qui les tairait se présenterait confiant sur une machine que
+  // `classify()` a déjà jugée fragile.
+  const horsPerimetre = [...classification.blockers, "aucune sauvegarde n'est configurée"]
   if (options.domaine === undefined) {
     horsPerimetre.push(
       "aucun domaine fourni : pas de bloc HTTPS ajouté au Caddyfile, l'application reste " +
@@ -244,7 +292,14 @@ export function composePlan(
       regime: classification.regime as "vierge" | "docker" | "skynode",
       empreinte_etat,
       application: options.application,
-      resume: buildResume(classification.regime, dockerfileProvided, generatedStep, project, options),
+      resume: buildResume(
+        classification.regime,
+        caddyMissing,
+        dockerfileProvided,
+        generatedStep,
+        project,
+        options
+      ),
       etapes,
       hors_perimetre: horsPerimetre,
       reversible: true,
@@ -271,6 +326,7 @@ function derivePlanId(empreinte_etat: string, application: string, etapes: PlanS
  */
 function buildResume(
   regime: Classification["regime"],
+  caddyMissing: boolean,
   dockerfileProvided: boolean,
   generatedStep: Extract<PlanStep, { type: "build.generate_dockerfile" }> | null,
   project: ProjectFacts,
@@ -282,6 +338,10 @@ function buildResume(
     parts.push("installer Docker et Caddy")
   } else if (regime === "docker") {
     parts.push("installer Caddy sur le Docker déjà présent")
+  } else if (regime === "skynode" && caddyMissing) {
+    // Le cas d'équipement de l'axe B : la machine est gérée par SkyNode mais son
+    // conteneur Caddy a disparu depuis — on le repose plutôt que de refuser.
+    parts.push("réinstaller Caddy, absent de la machine")
   }
 
   if (dockerfileProvided) {
