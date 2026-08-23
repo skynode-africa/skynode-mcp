@@ -1,3 +1,6 @@
+import { fileURLToPath } from "node:url"
+import { dirname, resolve } from "node:path"
+
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
@@ -7,6 +10,11 @@ import type { Instance } from "./api.js"
 import { SkyNodeApi, SkyNodeError } from "./api.js"
 import type { SshResult, SshRunner } from "./ssh.js"
 import { registerTools } from "./tools.js"
+
+const here = dirname(fileURLToPath(import.meta.url))
+
+/** Le projet Next.js sans Dockerfile du jalon 2 : le cas nominal, déployable en l'état. */
+const FIXTURE_NEXT = resolve(here, "..", "fixtures", "next-sans-dockerfile")
 
 const instance: Instance = {
   id: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
@@ -32,6 +40,18 @@ const PROBE_OK = [
   "access.elevate\troot",
   "docker.present\tnon",
   "skynode.present\tnon",
+  "probe.end\t1",
+].join("\n")
+
+/** Même sonde, portant en plus un panneau de contrôle détecté — régime non exécutable. */
+const PROBE_AVEC_PANNEAU = [
+  "probe.version\t1",
+  "host.os_id\tubuntu",
+  "host.os_version\t24.04",
+  "access.elevate\troot",
+  "docker.present\tnon",
+  "skynode.present\tnon",
+  "panel\taapanel /www/server/panel",
   "probe.end\t1",
 ].join("\n")
 
@@ -89,13 +109,14 @@ async function withClient<T>(
 }
 
 describe("registerTools", () => {
-  it("enregistre les quatre outils du jalon 2", () => {
+  it("enregistre les cinq outils", () => {
     const tools = mount({})
 
     expect([...tools.keys()].sort()).toEqual([
       "inspect_project",
       "inspect_server",
       "list_servers",
+      "plan_deployment",
       "server_status",
     ])
   })
@@ -268,6 +289,100 @@ describe("registerTools", () => {
       expect(result.content[0].text).toContain("obligatoire")
       expect(result.content[0].text).toContain("list_servers")
       expect(result.content[0].text).not.toContain("expected string")
+    })
+  })
+
+  it("compose un plan de bout en bout", async () => {
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, fakeSsh())
+    const out = (await tools.get("plan_deployment")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      application: "boutique",
+    } as never)) as { isError?: boolean }
+
+    expect(JSON.stringify(out)).toMatch(/Docker/)
+    expect(out.isError).toBeFalsy()
+  })
+
+  it("rend le refus du jalon 2 quand le régime n'est pas exécutable", async () => {
+    const tools = mount(
+      { getInstance: vi.fn().mockResolvedValue(instance) },
+      fakeSsh({ stdout: PROBE_AVEC_PANNEAU })
+    )
+    const out = (await tools.get("plan_deployment")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      application: "boutique",
+    } as never)) as { isError?: boolean; content: { text: string }[] }
+
+    expect(out.content[0]?.text).toMatch(/aaPanel/i)
+    expect(out.content[0]?.text).not.toMatch(/erreur|échec/i)
+  })
+
+  it("n'ouvre aucune session SSH sur un serveur non démarré, pour plan_deployment", async () => {
+    const run = vi.fn()
+    const tools = mount(
+      { getInstance: vi.fn().mockResolvedValue({ ...instance, status: "PROVISIONING" }) },
+      { run }
+    )
+    await tools.get("plan_deployment")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      application: "boutique",
+    } as never)
+
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  /**
+   * L'invariant du jalon 2, qui doit tenir ici aussi : la cible SSH vient de l'API, jamais
+   * de l'agent, et rien dans le schéma ne permet d'en désigner une autre.
+   *
+   * Le brief décrit `required` trié alphabétiquement ; `z.toJSONSchema` (zod 4, sous le
+   * SDK) rend en réalité l'ordre de déclaration du schéma — confirmé par l'échec de cette
+   * assertion avant correction. La propriété qui compte, et que ce test vérifie bien,
+   * est l'ensemble des trois champs obligatoires, pas leur ordre.
+   */
+  it("n'expose aucun paramètre d'hôte ni de commande", async () => {
+    await withClient({}, fakeSsh(), async (client) => {
+      const { tools } = await client.listTools()
+      const outil = tools.find((t) => t.name === "plan_deployment")
+
+      expect(Object.keys(outil!.inputSchema.properties ?? {}).sort()).toEqual([
+        "application",
+        "domaine",
+        "env_file",
+        "project_path",
+        "server_id",
+      ])
+      expect([...(outil!.inputSchema.required ?? [])].sort()).toEqual([
+        "application",
+        "project_path",
+        "server_id",
+      ])
+    })
+  })
+
+  /** Le plan rendu doit être lisible, pas du JSON — c'est lui que le développeur approuve. */
+  it("rend un texte français, jamais le JSON du plan", async () => {
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, fakeSsh())
+    const out = (await tools.get("plan_deployment")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      application: "boutique",
+    } as never)) as { content: { text: string }[] }
+
+    expect(out.content[0]?.text).not.toMatch(/"etapes"|"type":/)
+  })
+
+  it("refuse en français un nom d'application absent", async () => {
+    await withClient({}, fakeSsh(), async (client) => {
+      const result = (await client.callTool({
+        name: "plan_deployment",
+        arguments: { server_id: "x", project_path: "/tmp" },
+      })) as { isError?: boolean }
+
+      expect(result.isError).toBe(true)
     })
   })
 })
