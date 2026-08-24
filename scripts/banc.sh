@@ -38,6 +38,11 @@ VOLUME_DOCKER="skynode-banc-docker-lib"
 # récursivement qu'un chemin dont ce script a lui-même choisi le dernier segment.
 BANC_DIR="${SKYNODE_BANC_DIR:-${TMPDIR:-/tmp}}/skynode-banc"
 
+# `systemd` en PID 1 exige d'écrire dans son arborescence de cgroups, et UFW d'appeler
+# netfilter. Les deux modes en ont besoin — le pare-feu de `host.prepare` n'est pas moins
+# essentiel à éprouver que Docker.
+PRIVILEGES="--privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw"
+
 # Le banc n'écoute que sur la boucle locale : il porte une clé sans phrase de passe et
 # autorise root, ce qui n'a rien à faire sur une interface exposée.
 BIND_ADDR="127.0.0.1"
@@ -84,11 +89,45 @@ FROM $BASE_IMAGE
 ENV DEBIAN_FRONTEND=noninteractive
 # iproute2 pour \`ss\`, dont la sonde du jalon 2 se sert ; ca-certificates et curl parce que
 # l'installation de Docker par le script de la tâche 3 en dépendra.
+# \`systemd\` est indispensable, pas confortable : \`host.install_docker\` fait
+# \`systemctl enable --now docker\`, UFW a besoin de netfilter et fail2ban de \`systemd\`.
+# Un banc dont le PID 1 est \`sshd\` ferait échouer ces étapes pour une raison propre au
+# banc, et l'on chercherait le défaut dans le script du produit.
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-      openssh-server iproute2 ca-certificates curl sudo \\
+      systemd systemd-sysv openssh-server iproute2 ca-certificates curl sudo \\
     && rm -rf /var/lib/apt/lists/*
 $extra
-RUN ssh-keygen -A && mkdir -p /run/sshd
+RUN ssh-keygen -A && mkdir -p /run/sshd && systemctl enable ssh
+# La clé publique arrive par l'environnement et s'installe **avant** \`ssh.service\`. Un
+# \`docker cp\` après démarrage laisserait une fenêtre où \`sshd\` écoute sans autoriser
+# personne.
+RUN printf '%s\\n' \\
+      '[Unit]' \\
+      'Description=Cle jetable du banc' \\
+      'Before=ssh.service' \\
+      'DefaultDependencies=no' \\
+      'After=local-fs.target' \\
+      '[Service]' \\
+      'Type=oneshot' \\
+      'RemainAfterExit=yes' \\
+      'ExecStart=/usr/local/sbin/banc-cle' \\
+      '[Install]' \\
+      'WantedBy=sysinit.target' \\
+    > /etc/systemd/system/banc-cle.service \\
+ && printf '%s\\n' \\
+      '#!/bin/sh' \\
+      'set -e' \\
+      '# La clé se lit dans l environnement de PID 1, pas dans le sien : systemd ne' \\
+      '# transmet pas son environnement aux services quil lance, et un service qui la' \\
+      '# lirait chez lui ecrirait un authorized_keys vide sans echouer.' \\
+      'pubkey=\$(tr "\\\\0" "\\\\n" < /proc/1/environ | sed -n "s/^SKYNODE_BANC_PUBKEY=//p")' \\
+      '[ -n "\$pubkey" ] || { echo "cle publique absente de lenvironnement" >&2; exit 1; }' \\
+      'mkdir -p /root/.ssh && chmod 700 /root/.ssh' \\
+      'printf "%s\\\\n" "\$pubkey" > /root/.ssh/authorized_keys' \\
+      'chmod 600 /root/.ssh/authorized_keys' \\
+    > /usr/local/sbin/banc-cle \\
+ && chmod 755 /usr/local/sbin/banc-cle \\
+ && systemctl enable banc-cle
 # Aucune directive \`sshd\` n'est écrite ici, et c'est délibéré : le banc doit partir dans
 # l'état d'un VPS nu. Le durcissement de la tâche 4 se vérifie par \`sshd -T\` ; un banc
 # livré déjà durci lui ferait lire ses propres valeurs et son filet se validerait contre sa
@@ -115,23 +154,12 @@ make_key() {
   ssh-keygen -q -t ed25519 -N "" -C "skynode-banc" -f "$key"
 }
 
-# Le démarrage se passe d'un point d'entrée compilé dans l'image : le conteneur reçoit la
-# clé publique par l'environnement et l'installe lui-même. Un `docker cp` après démarrage
-# laisserait une fenêtre où `sshd` écoute sans autoriser personne.
+# Le conteneur démarre `systemd`, qui lance à son tour `banc-cle.service` puis `ssh.service`
+# — l'ordre est déclaré dans les unités, pas ici. `dockerd` du mode `--with-docker` est lui
+# aussi un service : lancé en arrière-plan par un `&`, il ne redémarrerait pas après un
+# `systemctl restart docker`, que la tâche 3 a précisément besoin d'éprouver.
 start_command() {
-  mode="$1"
-  # Guillemets simples : `$SKYNODE_BANC_PUBKEY` doit atteindre le shell du conteneur, pas
-  # être remplacé ici.
-  boot='set -e
-mkdir -p /root/.ssh && chmod 700 /root/.ssh
-printf "%s\n" "$SKYNODE_BANC_PUBKEY" > /root/.ssh/authorized_keys
-chmod 600 /root/.ssh/authorized_keys
-'
-  if [ "$mode" = "docker" ]; then
-    boot="$boot"'dockerd >/var/log/dockerd.log 2>&1 &
-'
-  fi
-  printf '%s' "$boot"'exec /usr/sbin/sshd -D -e'
+  printf '%s' "/lib/systemd/systemd"
 }
 
 host_port() {
@@ -165,6 +193,8 @@ wait_for_dockerd() {
   port="$2"
   i=0
   while [ "$i" -lt 90 ]; do
+    # `systemd` démarre `docker.service` de lui-même ; on attend qu'il réponde, sans le
+    # relancer à la main — c'est le comportement d'un VPS, et celui que la tâche 3 éprouve.
     if ssh_to "$key" "$port" docker info >/dev/null 2>&1; then return 0; fi
     i=$((i + 1))
     sleep 1
@@ -226,16 +256,18 @@ cmd_up() {
     # `--privileged` : Docker-dans-Docker en a besoin (cgroups, montages, réseau). C'est
     # acceptable ici et nulle part ailleurs — ce conteneur est jetable et n'écoute que sur
     # la boucle locale.
-    docker run -d --name "$name" --privileged \
+    # shellcheck disable=SC2086  # PRIVILEGES est une liste d'options, pas un seul argument.
+    docker run -d --name "$name" $PRIVILEGES \
       -v "$VOLUME_DOCKER:/var/lib/docker" \
       -e SKYNODE_BANC_PUBKEY="$(cat "$key.pub")" \
       -p "$BIND_ADDR::22" "$image" \
-      sh -c "$(start_command "$mode")" >/dev/null
+      "$(start_command "$mode")" >/dev/null
   else
-    docker run -d --name "$name" \
+    # shellcheck disable=SC2086  # PRIVILEGES est une liste d'options, pas un seul argument.
+    docker run -d --name "$name" $PRIVILEGES \
       -e SKYNODE_BANC_PUBKEY="$(cat "$key.pub")" \
       -p "$BIND_ADDR::22" "$image" \
-      sh -c "$(start_command "$mode")" >/dev/null
+      "$(start_command "$mode")" >/dev/null
   fi
 
   port=$(host_port "$name")
