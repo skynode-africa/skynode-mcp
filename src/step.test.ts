@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest"
 
 import type { PlanStep } from "./plan-types.js"
 import type { StepContext } from "./step.js"
-import { TYPES_IMPLEMENTES, isReversible, recipeFor, verifieConformiteScript } from "./step.js"
+import type { StepRecipe } from "./step.js"
+import {
+  TYPES_IMPLEMENTES,
+  isReversible,
+  recipeFor,
+  verifieConformiteScript,
+  verifieUnScript,
+} from "./step.js"
 
 /**
  * Une étape valide par type — les mêmes valeurs que `plan-types.ts` accepte, pas des
@@ -123,40 +130,171 @@ describe("les scripts produits", () => {
    */
   const fautifs: ReadonlyArray<readonly [string, string]> = [
     ["sans marqueur de fin", "printf 'step.outcome\\tunchanged\\n'"],
-    ["avec un bashisme", "if [[ -d /srv ]]; then :; fi\nprintf 'unchanged step.end\\n'"],
-    ["avec local", "f() {\n  local x=1\n}\nprintf 'unchanged step.end\\n'"],
     ["sans garde d'idempotence", "printf 'step.outcome\\tapplied\\nstep.end\\t1\\n'"],
   ]
 
   it.each(fautifs)("le harnais refuse un script %s", (_nom, script) => {
-    // Le harnais lit la recette du tableau ; on lui en substitue une le temps du test, sans
-    // toucher au module — c'est le seul moyen de l'éprouver avant qu'une recette existe.
-    const recette = recipeFor("state.record")
-    const original = recette.script
-    recette.script = () => script
-
-    try {
-      expect(() => verifieConformiteScript("state.record", etapeDe("state.record"), contexte())).toThrow(
-        /contrôle/
-      )
-    } finally {
-      recette.script = original
-    }
+    expect(() => verifieUnScript("state.record", "script", script, true)).toThrow(/contrôle/)
   })
 
   it("le harnais accepte un script conforme", () => {
-    const recette = recipeFor("state.record")
-    const original = recette.script
-    recette.script = () =>
-      ["printf 'step.outcome\\t%s\\n' unchanged", "printf 'step.end\\t1\\n'"].join("\n")
+    const script = ["printf 'step.outcome\\t%s\\n' unchanged", "printf 'step.end\\t1\\n'"].join("\n")
 
-    try {
+    expect(() => verifieUnScript("state.record", "script", script, true)).not.toThrow()
+  })
+
+  /**
+   * Les formes que `dash` — le `/bin/sh` de Debian et d'Ubuntu — refuse, ou pire, accepte en
+   * leur donnant un autre sens.
+   *
+   * Les quatre dernières sont les plus dangereuses et justifient à elles seules ce contrôle :
+   * mesuré sous le `dash` d'Ubuntu 24.04, `sleep 2 &> /dev/null` rend **en zéro seconde** —
+   * la commande est partie en arrière-plan — sans que `set -e` bronche, et
+   * `echo -e "a\tb"` imprime `-e` au lieu de l'interpréter. Un `docker build … &> /dev/null`
+   * rendrait donc `applied` sans qu'aucune image existe.
+   */
+  const bashismes: ReadonlyArray<readonly [string, string]> = [
+    ["[[", "if [[ -d /srv ]]; then :; fi"],
+    ["une affectation de tableau", "arr=(a b c)"],
+    ["une affectation de tableau indentée", "  arr=(a b c)"],
+    ["une affectation de tableau après ;", "x=1; arr=(a b)"],
+    ["function nom()", "function f() { echo a; }"],
+    ["function sans parenthèses", "function f { echo a; }"],
+    ["une substitution de processus", "diff <(ls) <(ls)"],
+    ["source", "source /etc/profile"],
+    ["source indenté", "  source /etc/profile"],
+    ["source après &&", "true && source /etc/profile"],
+    ["local sur une ligne", "f() { local x=1; }"],
+    ["local après ;", "f() { :; local x=1; }"],
+    ["local indenté", "  local x=1"],
+    ["&>", "docker build . &> /dev/null"],
+    ["&>>", "docker build . &>> /tmp/journal"],
+    ["echo -e", 'echo -e "a\\tb"'],
+    ["echo -e après |", "ls | echo -e x"],
+  ]
+
+  it.each(bashismes)("le harnais refuse %s", (_nom, fragment) => {
+    const script = `${fragment}\nprintf 'unchanged step.end\\n'`
+
+    expect(() => verifieUnScript("state.record", "script", script, true)).toThrow(/contrôle/)
+  })
+
+  /**
+   * L'autre sens, sans quoi un contrôle trop large ferait rejeter des scripts corrects — et
+   * la tâche qui s'y heurterait le contournerait plutôt que de le comprendre. Ces seize
+   * formes ont toutes été passées au `dash` réel d'Ubuntu 24.04 : aucune n'y est fautive.
+   */
+  const conformes: ReadonlyArray<readonly [string, string]> = [
+    ["le test POSIX", "[ -f x ] && echo a"],
+    ["un chemin contenant « source »", "tar -xf /usr/src/source.tar"],
+    ["« source » en argument", "echo /usr/src/source.tar"],
+    ["un mot finissant par « source »", "resource=1"],
+    ["« -e » dans une chaîne", 'echo "-e reste littéral"'],
+    ["« -e » en second argument", "echo x -e"],
+    ["printf", "printf 'a\\tb\\n'"],
+    ["la redirection POSIX", "docker build . > /dev/null 2>&1"],
+    ["&& , qui n'est pas &>", "true && false"],
+    ["le point, forme POSIX de source", ". /etc/profile"],
+    ["une substitution de commande", "x=$(ls)"],
+    ["une affectation simple", "x=1"],
+    ["case et sa parenthèse fermante", "case $x in a) echo a;; esac"],
+    ["un mot commençant par « local »", "localiser() { echo a; }"],
+    ["« local » en préfixe de mot", "echo localhost"],
+    ["un script ordinaire", "if [ 1 -gt 0 ]; then :; fi"],
+  ]
+
+  it.each(conformes)("le harnais accepte %s", (_nom, fragment) => {
+    const script = `${fragment}\nprintf 'unchanged step.end\\n'`
+
+    expect(() => verifieUnScript("state.record", "script", script, true)).not.toThrow()
+  })
+
+  /**
+   * Le script d'annulation ne s'emprunte qu'après l'échec d'une étape : c'est le chemin le
+   * moins parcouru, et celui dont la défaillance produit le serveur laissé à mi-chemin que
+   * l'invariant n°4 désigne comme le pire résultat possible. Il subit donc les mêmes
+   * contrôles — la garde d'idempotence exceptée, qui n'a pas de sens pour une annulation.
+   */
+  describe("le script d'annulation", () => {
+    it("subit le contrôle des bashismes", () => {
       expect(() =>
-        verifieConformiteScript("state.record", etapeDe("state.record"), contexte())
+        verifieUnScript("state.record", "script d'annulation", "cmd &> /dev/null\nstep.end", false)
+      ).toThrow(/bashisme/)
+    })
+
+    it("subit le contrôle du marqueur de fin", () => {
+      expect(() => verifieUnScript("state.record", "script d'annulation", "rm -f /x", false)).toThrow(
+        /marqueur de fin/
+      )
+    })
+
+    it("est dispensé de la garde d'idempotence", () => {
+      expect(() =>
+        verifieUnScript("state.record", "script d'annulation", "rm -f /x\nstep.end", false)
       ).not.toThrow()
-    } finally {
-      recette.script = original
-    }
+    })
+
+    it("nomme lequel des deux scripts est fautif", () => {
+      expect(() =>
+        verifieUnScript("state.record", "script d'annulation", "rm -f /x", false)
+      ).toThrow(/script d'annulation/)
+    })
+
+    /**
+     * Le branchement, et non les seuls contrôles : une épreuve par mutation a montré que
+     * retirer l'appel à `undoScript` dans `verifieConformiteScript` ne tuait aucun test,
+     * puisque tous s'adressaient à `verifieUnScript` en direct. C'est pourtant le
+     * branchement qui fait le correctif.
+     */
+    it("est bien relu par le harnais complet", () => {
+      const conforme = "printf 'unchanged step.end\\n'"
+      const recette: StepRecipe = {
+        script: () => conforme,
+        undoScript: () => "cmd &> /dev/null\nstep.end",
+      }
+
+      expect(() =>
+        verifieConformiteScript("state.record", etapeDe("state.record"), contexte(), recette)
+      ).toThrow(/script d'annulation/)
+    })
+
+    it("n'est pas exigé quand la recette rend `null`", () => {
+      const recette: StepRecipe = {
+        script: () => "printf 'unchanged step.end\\n'",
+        undoScript: () => null,
+      }
+
+      expect(() =>
+        verifieConformiteScript("state.record", etapeDe("state.record"), contexte(), recette)
+      ).not.toThrow()
+    })
+  })
+
+  /**
+   * Le tableau des recettes est la seule source de scripts du produit. S'il restait
+   * modifiable, du code du processus pourrait forcer `undoScript` à rendre `null` :
+   * `isReversible` continuerait de promettre un retour arrière que l'exécuteur ne ferait
+   * plus. Un plan ne peut pas l'atteindre — il faut du code ici —, mais l'en-tête du module
+   * l'affirme, et une promesse tenue par convention n'en est pas une.
+   */
+  describe("les recettes sont gelées", () => {
+    it.each(TOUS_LES_TYPES)("%s est gelée", (type) => {
+      expect(Object.isFrozen(recipeFor(type))).toBe(true)
+    })
+
+    it("une réécriture de script ne prend pas", () => {
+      const avant = recipeFor("state.record").script
+
+      try {
+        // @ts-expect-error — on éprouve ce qu'un appelant non typé pourrait tenter.
+        recipeFor("state.record").script = () => "détourné"
+      } catch {
+        // En mode strict, l'affectation lève ; hors mode strict elle est ignorée. Les deux
+        // conviennent, seul le résultat compte.
+      }
+
+      expect(recipeFor("state.record").script).toBe(avant)
+    })
   })
 })
 

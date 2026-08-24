@@ -5,8 +5,9 @@ import type { PlanStep, StepType } from "./plan-types.js"
  * avant même qu'elle soit écrite.
  *
  * Le vocabulaire des étapes est fermé (`plan-types.ts`) ; ce module lui associe une recette
- * par type, et rien d'autre ne peut en produire une. Un exécuteur ne compose donc jamais de
- * commande : il demande la recette d'un type validé, ou il n'obtient rien.
+ * par type, et `recipeFor` en est la seule source. Un exécuteur ne compose donc jamais de
+ * commande : il demande la recette d'un type validé, ou il n'obtient rien. Le tableau et
+ * chaque recette sont gelés, pour que cela reste vrai après le premier appel.
  *
  * Les scripts eux-mêmes sont écrits par les tâches 3 à 7. Ici, chaque type a bien sa
  * recette — le tableau est complet dès maintenant — mais celles qui restent à écrire lèvent
@@ -89,14 +90,14 @@ function recetteAEcrire(type: StepType): StepRecipe {
     )
   }
 
-  return {
+  return Object.freeze({
     script: refus,
     // Une étape irréversible n'a pas d'annulation à écrire : `null` est déjà sa réponse
     // définitive, et la rendre dès maintenant n'anticipe sur rien. Les autres lèvent, parce
     // qu'y répondre `null` les ferait passer pour irréversibles et contredirait
     // `isReversible` — l'exécuteur promettrait alors un retour arrière qu'il ne ferait pas.
     undoScript: REVERSIBILITY[type] ? refus : () => null,
-  }
+  })
 }
 
 /**
@@ -104,6 +105,9 @@ function recetteAEcrire(type: StepType): StepRecipe {
  * recette réelle, importée de `steps-host.ts`, `steps-proxy.ts`, `steps-build.ts` ou
  * `steps-app.ts` — ces modules ne dépendent de celui-ci que par des types, donc sans cycle
  * à l'exécution.
+ *
+ * **Toute recette réelle doit être gelée à sa construction**, comme celles d'ici : un test
+ * l'exige pour chaque type inscrit dans `TYPES_IMPLEMENTES`.
  */
 const RECIPES: Record<StepType, StepRecipe> = {
   "host.prepare": recetteAEcrire("host.prepare"),
@@ -116,6 +120,20 @@ const RECIPES: Record<StepType, StepRecipe> = {
   "proxy.caddy.site": recetteAEcrire("proxy.caddy.site"),
   "state.record": recetteAEcrire("state.record"),
 }
+
+// `recipeFor` rend l'objet du tableau, pas une copie : sans gel, du code du processus
+// pourrait remplacer une recette pour de bon — notamment forcer `undoScript` à rendre
+// `null`, ce qui ferait mentir `isReversible` en silence. Un plan ne peut pas l'atteindre,
+// il faut du code ici ; mais l'en-tête de ce module promet qu'aucune autre source de
+// recette n'existe, et une promesse tenue par convention n'en est pas une.
+//
+// Ce gel-ci n'est **pas couvert par un test**, et volontairement : `RECIPES` est privé au
+// module, donc son remplacement n'est observable de nulle part au dehors. Il ne protège
+// que contre une entrée réécrite depuis ce fichier même — ce qu'y feront les tâches 3 à 7.
+// Une épreuve par mutation le confirme : le retirer ne tue aucun test. Écrire un test qui
+// passerait sans rien éprouver coûterait plus qu'il ne rapporte. Le gel de chaque recette,
+// lui, est bien couvert.
+Object.freeze(RECIPES)
 
 export function recipeFor(type: PlanStep["type"]): StepRecipe {
   // `Object.hasOwn`, pas `RECIPES[type] === undefined` : un appelant non typé demandant
@@ -141,32 +159,71 @@ export function recipeFor(type: PlanStep["type"]): StepRecipe {
  */
 export const TYPES_IMPLEMENTES: readonly PlanStep["type"][] = []
 
+/**
+ * Ce que `dash` — le `/bin/sh` de Debian et d'Ubuntu — refuse ou, pire, accepte en lui
+ * donnant un autre sens. Les deux dernières entrées sont les plus dangereuses : elles ne
+ * lèvent rien, même sous `set -e`. `cmd &> /dev/null` y est lu comme `cmd &` suivi de
+ * `> /dev/null`, donc la commande part en arrière-plan et l'étape rend `applied` avant que
+ * quoi que ce soit ait abouti ; `echo -e "a\tb"` imprime le `-e` au lieu de l'interpréter.
+ */
+const BASHISMES: ReadonlyArray<{ motif: RegExp; quoi: string }> = [
+  { motif: /\[\[/, quoi: "`[[`" },
+  // Une affectation de tableau. Ancrée à un début de mot pour ne pas confondre avec la
+  // substitution `$(…)` ni avec un `=(` apparaissant dans une chaîne quotée.
+  { motif: /(^|[;&|(\s])[A-Za-z_][A-Za-z0-9_]*=\(/m, quoi: "une affectation de tableau `nom=(…)`" },
+  { motif: /(^|[;&|{\s])function\s+[A-Za-z_][A-Za-z0-9_]*\s*(\(\s*\))?\s*\{/m, quoi: "`function nom()`" },
+  { motif: /[<>]\(/, quoi: "une substitution de processus `<(…)`" },
+  // `source` comme commande, jamais comme fragment de chemin : `/usr/src/source.tar` ne
+  // doit pas déclencher, `. fichier` est la forme POSIX à employer.
+  { motif: /(^[ \t]*|[;&|{][ \t]*|\s&&\s|\s\|\|\s)source\s+\S/m, quoi: "`source` (utiliser `.`)" },
+  // `&>` et `&>>`. La forme POSIX est `> fichier 2>&1`. On exclut `&&`, et `2>&1` ne
+  // correspond pas puisqu'il n'y a pas de `&` avant le `>`.
+  { motif: /(^|[^&>])&>/m, quoi: "`&>` (utiliser `> fichier 2>&1`)" },
+  // `echo -e` en tête de commande. Un argument qui commence par `-e` sans être le premier
+  // n'est pas concerné, et `echo "-e ..."` non plus.
+  { motif: /(^|[;&|{]\s*|\s&&\s|\s\|\|\s|\|\s*)echo\s+-e\b/m, quoi: "`echo -e` (utiliser `printf`)" },
+]
+
 /** Chaque contrôle du harnais, avec ce qu'il empêche, pour que l'échec se lise seul. */
-const CONTROLES: ReadonlyArray<{ nom: string; verifie: (script: string) => boolean; pourquoi: string }> = [
+const CONTROLES: ReadonlyArray<{
+  nom: string
+  verifie: (script: string) => boolean
+  pourquoi: string
+  /** Faux pour les contrôles qui n'ont pas de sens sur un script d'annulation. */
+  surUndo: boolean
+}> = [
   {
     nom: "marqueur de fin",
     verifie: (s) => s.includes("step.end"),
     pourquoi:
       "sans lui, `runRemote` juge la sortie tronquée et rend `failed` sur une étape pourtant jouée jusqu'au bout",
+    surUndo: true,
   },
   {
     nom: "pas de bashisme",
-    // `/bin/sh` est `dash` sur Debian et Ubuntu : `[[` y est une erreur de syntaxe, sur le
-    // serveur du client et jamais ici.
-    verifie: (s) => !/\[\[/.test(s),
-    pourquoi: "`[[` n'existe pas dans le `sh` du serveur",
+    // `/bin/sh` est `dash` sur Debian et Ubuntu : ces formes échouent — ou changent de
+    // sens — sur le serveur du client, et jamais ici. Ce motif ne connaît que ce qu'on lui
+    // a appris ; `scripts/banc.sh check` soumet le script au vrai `dash`, et c'est lui qui
+    // fait autorité.
+    verifie: (s) => !BASHISMES.some(({ motif }) => motif.test(s)),
+    pourquoi: "ces formes n'ont pas le même sens dans le `sh` du serveur, quand elles y sont valides",
+    surUndo: true,
   },
   {
     nom: "pas de `local`",
     // Une vraie RegExp, pas un motif reconstruit depuis un gabarit : dans un littéral de
     // gabarit JS, `\s` se réduit à un `s` littéral et le contrôle ne chercherait plus rien.
-    verifie: (s) => !/^\s*local\s/m.test(s),
+    // Désancré du début de ligne, sinon `f() { local x=1; }` passe.
+    verifie: (s) => !/(^[ \t]*|[;&|{][ \t]*)local\s/m.test(s),
     pourquoi: "`local` n'est pas POSIX — accepté par `dash` mais pas par tous les `sh`",
+    surUndo: true,
   },
   {
     nom: "garde d'idempotence",
     verifie: (s) => s.includes("unchanged"),
     pourquoi: "une étape rejouée doit pouvoir dire qu'elle n'a rien changé (invariant n°3)",
+    // Une annulation n'a pas ce contrat : elle défait, elle ne se rejoue pas pour constater.
+    surUndo: false,
   },
 ]
 
@@ -182,14 +239,47 @@ const CONTROLES: ReadonlyArray<{ nom: string; verifie: (script: string) => boole
 export function verifieConformiteScript(
   type: PlanStep["type"],
   etape: PlanStep,
-  ctx: StepContext
+  ctx: StepContext,
+  /**
+   * La recette à éprouver, par défaut celle du type. Injectable pour que le branchement de
+   * ce harnais — et non les seuls contrôles — soit couvert avant qu'une recette réelle
+   * existe : le tableau est gelé, on ne peut plus y substituer une recette d'essai.
+   */
+  recette: StepRecipe = recipeFor(type)
 ): void {
-  const script = recipeFor(type).script(etape, ctx)
+  verifieUnScript(type, "script", recette.script(etape, ctx), true)
 
+  // Le script d'annulation subit les mêmes contrôles, la garde d'idempotence exceptée. Il
+  // ne s'emprunte qu'après l'échec d'une étape : c'est le chemin le moins parcouru, et
+  // celui dont la défaillance produit le serveur laissé à mi-chemin que l'invariant n°4
+  // désigne comme le pire résultat possible.
+  const undo = recette.undoScript(etape, ctx)
+  if (undo !== null) verifieUnScript(type, "script d'annulation", undo, false)
+}
+
+/**
+ * Les mêmes contrôles, sur un script fourni directement plutôt que produit par une recette.
+ *
+ * Exporté pour que les suites de tests éprouvent les contrôles eux-mêmes — un contrôle qui
+ * laisse tout passer est pire qu'aucun contrôle — **sans avoir à remplacer la recette d'un
+ * type dans le tableau**. Ce tableau est gelé, et l'idiome de la mutation, recopié par les
+ * tâches 3 à 7, aurait fini par masquer un défaut réel.
+ *
+ * `estPrincipal` à `false` lève la garde d'idempotence, qui ne s'applique pas à une
+ * annulation.
+ */
+export function verifieUnScript(
+  type: PlanStep["type"],
+  quel: string,
+  script: string,
+  estPrincipal: boolean
+): void {
   for (const controle of CONTROLES) {
+    if (!estPrincipal && !controle.surUndo) continue
+
     if (!controle.verifie(script)) {
       throw new Error(
-        `Le script de « ${type} » ne respecte pas le contrôle « ${controle.nom} » : ${controle.pourquoi}.`
+        `Le ${quel} de « ${type} » ne respecte pas le contrôle « ${controle.nom} » : ${controle.pourquoi}.`
       )
     }
   }
