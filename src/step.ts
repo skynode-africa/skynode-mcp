@@ -1,4 +1,5 @@
 import type { PlanStep, StepType } from "./plan-types.js"
+import { RECETTE_HOST_INSTALL_DOCKER, RECETTE_HOST_PREPARE } from "./steps-host.js"
 
 /**
  * Le protocole d'étape : ce qu'une recette doit rendre, et ce que le jalon garantit d'elle
@@ -110,8 +111,8 @@ function recetteAEcrire(type: StepType): StepRecipe {
  * l'exige pour chaque type inscrit dans `TYPES_IMPLEMENTES`.
  */
 const RECIPES: Record<StepType, StepRecipe> = {
-  "host.prepare": recetteAEcrire("host.prepare"),
-  "host.install_docker": recetteAEcrire("host.install_docker"),
+  "host.prepare": RECETTE_HOST_PREPARE,
+  "host.install_docker": RECETTE_HOST_INSTALL_DOCKER,
   "proxy.caddy.install": recetteAEcrire("proxy.caddy.install"),
   "build.generate_dockerfile": recetteAEcrire("build.generate_dockerfile"),
   "build.image": recetteAEcrire("build.image"),
@@ -157,7 +158,7 @@ export function recipeFor(type: PlanStep["type"]): StepRecipe {
  * soumise aux quatre contrôles — les oublier reviendrait à écrire un script d'écriture en
  * root que rien ne relit.
  */
-export const TYPES_IMPLEMENTES: readonly PlanStep["type"][] = []
+export const TYPES_IMPLEMENTES: readonly PlanStep["type"][] = ["host.prepare", "host.install_docker"]
 
 /**
  * Ce que `dash` — le `/bin/sh` de Debian et d'Ubuntu — refuse ou, pire, accepte en lui
