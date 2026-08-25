@@ -75,6 +75,22 @@ rien.
 - **Le plan vous est rendu en français**, étape par étape, jamais sous forme de données à
   déchiffrer. C'est ce texte-là que vous approuverez.
 
+## Le compte applicatif, et sa clé
+
+L'étape `host.prepare` — celle qui prépare un serveur avant d'y déployer quoi que ce soit —
+crée un compte non-root `skynode`, lui accorde `sudo` sans mot de passe, et **y recopie la
+clé qui a ouvert la session**, c'est-à-dire celle de `/root/.ssh/authorized_keys`.
+
+**Cette copie est prise une seule fois et ne suit pas.** Si vous révoquez plus tard une clé
+sur `root` — le geste réflexe quand un ordinateur est perdu ou volé — elle reste valable sur
+le compte `skynode`, qui peut devenir `root` sans mot de passe. Retirez-la des **deux**
+fichiers :
+
+- `/root/.ssh/authorized_keys`
+- `/home/skynode/.ssh/authorized_keys`
+
+Le rapport de l'étape le rappelle, au moment même où la copie a lieu.
+
 ## Prérequis SSH
 
 `inspect_server` s'appuie sur le client `ssh` du système, pas sur une bibliothèque

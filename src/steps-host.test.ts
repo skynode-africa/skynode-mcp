@@ -100,6 +100,51 @@ describe("host.install_docker", () => {
     expect(EMPREINTE_CLE_DOCKER).toMatch(/^[0-9A-F]{40}$/)
   })
 
+  /**
+   * M08 — la **valeur** de l'empreinte, pas seulement sa forme. Un `^[0-9A-F]{40}$` laisse
+   * passer n'importe quelle empreinte bien formée : une constante remplacée par celle d'une
+   * autre clé continuerait de le satisfaire, et c'est précisément le contrôle que ce module
+   * fait porter à lui seul l'authenticité d'un dépôt de paquets installés en root.
+   *
+   * Confrontée à la clé servie par `download.docker.com` sur le banc, et à une source
+   * indépendante.
+   */
+  it("épingle l'empreinte exacte de la clé Docker", () => {
+    expect(EMPREINTE_CLE_DOCKER).toBe("9DC858229FC7DD38854AE2D88D81803C0EBFCD88")
+    expect(scriptDocker()).toContain("'9DC858229FC7DD38854AE2D88D81803C0EBFCD88'")
+  })
+
+  /**
+   * **APT avec `signed-by=` fait confiance à toute clé primaire du trousseau**, pas
+   * seulement à la première. Établi sur le banc : une clé jetable concaténée après la vraie
+   * clé Docker passait le contrôle, puisque `awk … {print $10; exit}` retient la première
+   * empreinte — et `/etc/apt/keyrings/docker.asc` aurait porté les deux.
+   */
+  it("refuse un trousseau portant plus d'une clé primaire", () => {
+    const s = scriptDocker()
+    const compte = s.indexOf("nb_primaires=")
+    const empreinte = s.indexOf("empreinte=")
+
+    expect(compte).toBeGreaterThan(-1)
+    expect(s).toContain("grep -c '^pub:'")
+    expect(s).toMatch(/if \[ "\$nb_primaires" != 1 \]; then/)
+    // Le refus vient avant la comparaison d'empreinte : comparer d'abord ferait accepter
+    // un trousseau dont la première clé est la bonne.
+    expect(empreinte).toBeGreaterThan(compte)
+  })
+
+  /**
+   * La vraie clé Docker porte une **sous-clé** légitime — vérifié sur le banc, elle rend un
+   * second `fpr`. Compter les empreintes plutôt que les clés primaires ferait refuser
+   * l'installation qu'on veut permettre.
+   */
+  it("ne compte pas les sous-clés", () => {
+    const s = scriptDocker()
+
+    expect(s).not.toContain("grep -c '^fpr:'")
+    expect(s).not.toContain("^sub:")
+  })
+
   /** Sans cela, la première construction demande un mot de passe qui n'arrivera jamais. */
   it("ajoute l'utilisateur applicatif au groupe docker", () => {
     expect(scriptDocker()).toMatch(/usermod .*docker/)
@@ -196,9 +241,54 @@ describe("host.prepare", () => {
     expect(s.slice(filet, enable)).toMatch(/allow 22\/tcp.*echec/s)
   })
 
+  /**
+   * M02 — le refus par défaut du trafic entrant vient **après** la règle du port 22, et
+   * rien n'épinglait cet ordre-là.
+   *
+   * La nuance mesurée, parce qu'elle change ce qu'on cherche : le mutant **ne coupe pas la
+   * session en cours**, les `before.rules` d'UFW acceptant `ESTABLISHED,RELATED`. Il coupe
+   * les **reconnexions** — nouvelle session SSH : « Connection timed out during banner
+   * exchange », puis VIVANT-A-NOUVEAU après `ufw allow 22/tcp`. Un serveur qu'on ne peut
+   * plus rejoindre après avoir raccroché est perdu tout autant, et il l'est en silence :
+   * l'étape aura rendu `applied`.
+   */
+  it("pose le refus par défaut du trafic entrant APRÈS la règle du port 22", () => {
+    const s = scriptPrepare(0)
+    const allow = s.indexOf("ufw allow 22/tcp")
+    const deny = s.indexOf("ufw default deny incoming")
+
+    expect(allow).toBeGreaterThan(-1)
+    expect(deny).toBeGreaterThan(allow)
+  })
+
   /** Le pare-feu du client n'est jamais remis à zéro : ses règles ne nous appartiennent pas. */
   it("ne réinitialise pas le pare-feu existant", () => {
     expect(scriptPrepare(0)).not.toMatch(/ufw (--force )?reset/)
+  })
+
+  /**
+   * M13 — l'ordre des sections. Le fichier d'échange était joué **avant** la couche de
+   * sécurité : mesuré sur un banc neuf avec `/proc/swaps` masqué, `swapon` refusé rendait
+   * `failed` et laissait `Status: inactive`, un compte applicatif créé, sa clé posée et son
+   * `NOPASSWD: ALL` actif. Rejoué trois fois : identique. Et la recette se déclare
+   * irréversible, donc l'exécuteur ne défait rien — l'invariant n°4 en entier.
+   *
+   * Une machine sans fichier d'échange fonctionne ; une machine sans pare-feu est exposée.
+   */
+  it("pose toute la couche de sécurité AVANT de toucher au fichier d'échange", () => {
+    const s = scriptPrepare(2048)
+    const swap = s.search(/fallocate|swapon/)
+
+    expect(swap).toBeGreaterThan(-1)
+    for (const marqueur of [
+      "ufw --force enable",
+      "/etc/fail2ban/jail.d/50-skynode.conf",
+      "/etc/apt/apt.conf.d/51skynode-securite",
+    ]) {
+      const pose = s.indexOf(marqueur)
+      expect(pose).toBeGreaterThan(-1)
+      expect(swap).toBeGreaterThan(pose)
+    }
   })
 
   it("ne crée un fichier d'échange que si le plan en demande un", () => {
@@ -231,6 +321,37 @@ describe("host.prepare", () => {
     expect(s).toContain("# >>> skynode-swap >>>")
     expect(s).toContain("/swapfile none swap sw 0 0")
     expect(s).not.toMatch(/(^|[^>])>\s*'\/etc\/fstab'/m)
+  })
+
+  /**
+   * M30 — le bloc `fstab` est posé **après** un `swapon` réussi. Posé avant, un `swapon`
+   * refusé laisserait dans `/etc/fstab` la ligne d'un fichier d'échange que la branche
+   * d'échec vient de supprimer : au redémarrage suivant, `systemd` échouerait sur une unité
+   * de montage dont la cible n'existe pas, et le client verrait une machine dégradée sans
+   * rapport avec l'étape qui l'a laissée ainsi.
+   */
+  it("n'inscrit le swap dans fstab qu'après un swapon réussi", () => {
+    const s = scriptPrepare(2048)
+    const active = s.indexOf("swapon /swapfile")
+    const fstab = s.indexOf("# >>> skynode-swap >>>")
+
+    expect(active).toBeGreaterThan(-1)
+    expect(fstab).toBeGreaterThan(active)
+  })
+
+  /**
+   * M14 — la branche d'échec de `swapon` retire le fichier. Sans elle, un `swapon` refusé
+   * abandonnerait deux gigaoctets sur le disque d'un client sans rien lui dire, et le
+   * `[ ! -e /swapfile ]` du passage suivant croirait un échange déjà posé.
+   */
+  it("retire le fichier d'échange quand le noyau refuse de l'activer", () => {
+    const s = scriptPrepare(2048)
+    const branche = s.slice(
+      s.indexOf("if ! swapon /swapfile"),
+      s.indexOf("Le fichier d'échange a été créé mais le noyau")
+    )
+
+    expect(branche).toContain("rm -f /swapfile")
   })
 
   /**
@@ -294,9 +415,69 @@ describe("host.prepare", () => {
     expect(s).not.toContain("ALL=(ALL)")
   })
 
+  /**
+   * **`visudo -c` ne rattrape pas une écriture interrompue** : un fichier réduit à sa ligne
+   * de commentaire est un `sudoers` parfaitement valide. Mesuré sur le banc, `cat` remplacé
+   * par un enrobage qui écrit une ligne puis sort en erreur — les trois fichiers réduits à
+   * leur commentaire, `sudo -n` refusé pour le compte applicatif, et l'étape annonçant
+   * `applied` avec trois affirmations fausses.
+   *
+   * Le brouillon se relit donc **avant** tout le reste : avant `visudo`, avant le `cmp` qui
+   * décide de l'idempotence, avant l'installation.
+   */
+  it.each([
+    ["sudoers", "/etc/sudoers.d/90-skynode"],
+    ["fail2ban", "/etc/fail2ban/jail.d/50-skynode.conf"],
+    ["apt", "/etc/apt/apt.conf.d/51skynode-securite"],
+  ])("relit le brouillon de %s avant de s'en servir", (nom, chemin) => {
+    const s = scriptPrepare(0)
+    const brouillon = `/etc/skynode/.brouillon-${nom}`
+    const relecture = s.indexOf(`wc -c < '${brouillon}'`)
+    const usage = s.indexOf(`cmp -s '${brouillon}'`)
+
+    expect(relecture).toBeGreaterThan(-1)
+    expect(usage).toBeGreaterThan(relecture)
+    expect(s).toContain(`Écriture interrompue : le brouillon de ${chemin} est incomplet`)
+  })
+
+  /** Le contrôle `visudo` porte sur un brouillon dont on a d'abord établi qu'il est entier. */
+  it("relit le brouillon sudoers avant même de le soumettre à visudo", () => {
+    const s = scriptPrepare(0)
+
+    expect(s.indexOf("visudo -c")).toBeGreaterThan(s.indexOf("wc -c < '/etc/skynode/.brouillon-sudoers'"))
+  })
+
   /** Le `/etc/sudoers` du client n'est jamais ouvert : un fichier à part se retire seul. */
   it("n'écrit pas dans /etc/sudoers", () => {
     expect(scriptPrepare(0)).not.toMatch(/>\s*'?\/etc\/sudoers'/)
+  })
+
+  /**
+   * **La recopie de la clé est un instantané, jamais resynchronisé.** Mesuré :
+   * `/root/.ssh/authorized_keys` vidé entièrement, le compte applicatif garde sa clé,
+   * active, avec `NOPASSWD: ALL` — un client qui révoque une clé sur `root`, le geste
+   * réflexe quand un poste est perdu, ne révoque rien. Le rapport de l'étape doit le dire,
+   * en termes qu'un client comprend, au moment où la copie a lieu.
+   */
+  it("dit dans son rapport que la clé recopiée ne suivra pas", () => {
+    const s = scriptPrepare(0)
+
+    // Sans apostrophe : `shellQuote` rend `c'est` par `c'\''est`, et l'épingler sous cette
+    // forme lierait le test à la mécanique de citation plutôt qu'à ce que le client lira.
+    expect(s).toContain("une copie figée")
+    expect(s).toContain(`/root/.ssh/authorized_keys ne la retire pas de celui de ${UTILISATEUR_APPLICATIF}`)
+  })
+
+  /**
+   * M32 — le compte applicatif est ajouté au groupe `docker` ici **aussi**, et cette
+   * décision n'avait aucun test : l'ordre des deux étapes n'est pas garanti, et celle qui
+   * passe en second est la seule à pouvoir constater les deux moitiés.
+   */
+  it("ajoute aussi le compte applicatif au groupe docker, si le groupe existe", () => {
+    const s = scriptPrepare(0)
+
+    expect(s).toContain("if getent group docker >/dev/null 2>&1; then")
+    expect(s).toContain(`usermod -aG docker ${UTILISATEUR_APPLICATIF}`)
   })
 
   it("surveille sshd avec fail2ban", () => {
@@ -338,9 +519,16 @@ describe("host.prepare", () => {
     expect(s).not.toMatch(/systemctl (restart|reload|stop) ssh\b/)
   })
 
-  /** On n'arrête jamais un service qu'on n'a pas créé (invariant n°2). */
-  it("n'arrête aucun service", () => {
-    expect(scriptPrepare(2048)).not.toMatch(/systemctl stop\b/)
+  /**
+   * M05 — l'invariant n°2 interdit d'arrêter un service qu'on n'a pas créé, et un
+   * `restart` l'arrête aussi : `fail2ban` peut être celui du client, et le redémarrer
+   * lèverait sa protection le temps du redémarrage. Le test ne cherchait que `systemctl
+   * stop`, donc `reload` → `restart` y survivait.
+   */
+  it("n'arrête ni ne redémarre aucun service", () => {
+    expect(scriptPrepare(2048)).not.toMatch(/systemctl (stop|restart)\b/)
+    expect(scriptPrepare(0)).not.toMatch(/systemctl (stop|restart)\b/)
+    expect(scriptDocker()).not.toMatch(/systemctl (stop|restart)\b/)
   })
 
   it("n'est pas réversible", () => {

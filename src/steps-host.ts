@@ -206,7 +206,21 @@ function poseFichier(
     // Le contenu passe par `writeFileScript` : heredoc quoté, donc aucune expansion de
     // variable ni substitution de commande dans le fichier écrit — les `${distro_id}` de
     // la configuration APT doivent arriver littéralement chez le client.
-    ...writeFileScript(tmp, contenu, "0600").split("\n"),
+    //
+    // Le brouillon est relu avant qu'on s'en serve, et l'étape s'arrête net s'il est
+    // incomplet. `visudo -c` ne rattrape pas ce cas — un fichier réduit à sa ligne de
+    // commentaire est un `sudoers` parfaitement valide —, et une élévation perdue ferait
+    // échouer chaque étape suivante sur une invite de mot de passe qui n'arrivera jamais,
+    // sans que rien ne pointe vers la cause.
+    ...writeFileScript(
+      tmp,
+      contenu,
+      "0600",
+      "echec " +
+        shellQuote(
+          `Écriture interrompue : le brouillon de ${chemin} est incomplet, rien n'a été installé.`
+        )
+    ).split("\n"),
     ...controle,
     `if cmp -s ${shellQuote(tmp)} ${shellQuote(chemin)}; then`,
     `  ${variable}=non`,
@@ -290,8 +304,29 @@ const SCRIPT_INSTALL_DOCKER: string = [
   // `gpg` écrit dans son répertoire personnel dès qu'on l'invoque ; un `GNUPGHOME` jetable
   // évite de laisser un trousseau dans le `/root` du client pour une seule lecture.
   "  gpgdir=$(mktemp -d) || echec " + shellQuote("Création d'un répertoire temporaire impossible."),
-  "  empreinte=$(GNUPGHOME=\"$gpgdir\" gpg --batch --show-keys --with-colons \"$cle\" 2>/dev/null | awk -F: '$1==\"fpr\" {print $10; exit}')",
+  "  colonnes=$(GNUPGHOME=\"$gpgdir\" gpg --batch --show-keys --with-colons \"$cle\" 2>/dev/null)",
   "  rm -rf \"$gpgdir\"",
+  // **APT fait confiance à toute clé primaire du trousseau désigné par `signed-by=`**, pas
+  // seulement à la première. Épingler une seule empreinte ne prouve donc rien tant qu'on
+  // n'a pas établi qu'il n'y en a qu'une : mesuré sur le banc, une clé jetable concaténée
+  // après la vraie clé Docker passait le contrôle, et `/etc/apt/keyrings/docker.asc` aurait
+  // porté les deux — de quoi signer en root des paquets que personne n'a regardés.
+  //
+  // On compte les enregistrements `pub`, jamais les `fpr` : la vraie clé Docker porte
+  // légitimement une **sous-clé**, qui rend elle aussi un `fpr` et n'est pas une seconde
+  // autorité — elle appartient à la clé primaire déjà épinglée. Compter les `fpr` ferait
+  // refuser l'installation qu'on veut permettre.
+  "  nb_primaires=$(printf '%s\\n' \"$colonnes\" | grep -c '^pub:')",
+  "  if [ \"$nb_primaires\" != 1 ]; then",
+  "    rm -f \"$cle\"",
+  "    echec " +
+    shellQuote(
+      "Le fichier servi par download.docker.com ne porte pas exactement une clé primaire : installation refusée."
+    ),
+  "  fi",
+  // Le premier `fpr` du flux suit immédiatement l'unique `pub` : c'est l'empreinte de la
+  // clé primaire, celle que l'on épingle.
+  "  empreinte=$(printf '%s\\n' \"$colonnes\" | awk -F: '$1==\"fpr\" {print $10; exit}')",
   "  if [ \"$empreinte\" != " + shellQuote(EMPREINTE_CLE_DOCKER) + " ]; then",
   "    rm -f \"$cle\"",
   "    echec " + shellQuote("La clé servie par download.docker.com n'a pas l'empreinte attendue : installation refusée.") ,
@@ -383,7 +418,20 @@ function sectionCompte(): string[] {
   ]
 }
 
-/** La clé qui ouvre le compte applicatif, reprise de celle qui a ouvert la session. */
+/**
+ * La clé qui ouvre le compte applicatif, reprise de celle qui a ouvert la session.
+ *
+ * **C'est une copie, prise une fois, et rien ne la resynchronise ensuite.** Mesuré :
+ * `/root/.ssh/authorized_keys` vidé entièrement, le compte applicatif garde sa clé, active,
+ * avec son `NOPASSWD: ALL` — donc un client qui révoque une clé sur `root`, le geste réflexe
+ * quand un poste est perdu, ne révoque rien. Le rapport de l'étape le dit, en toutes lettres
+ * et au moment où la copie a lieu, plutôt que de laisser le client le découvrir.
+ *
+ * Une clé propre à SkyNode, posée et retirée par le produit, vaudrait mieux qu'une copie :
+ * elle se révoquerait d'un seul geste et cesserait de lier le sort de deux comptes. Elle
+ * demande un endroit où la garder et une étape pour la faire tourner ; ce n'est pas cette
+ * tâche-ci, et l'écrire à moitié serait pire que la copie annoncée pour ce qu'elle est.
+ */
 function sectionCle(): string[] {
   return [
     // Jamais par-dessus : un `authorized_keys` déjà garni est celui du client, et
@@ -393,7 +441,12 @@ function sectionCle(): string[] {
       shellQuote("Création du répertoire .ssh du compte applicatif impossible."),
     "  install -m 0600 -o " + UTILISATEUR_APPLICATIF + " -g \"$groupe\" /root/.ssh/authorized_keys \"$foyer/.ssh/authorized_keys\" || echec " +
       shellQuote("Copie de la clé autorisée vers le compte applicatif impossible."),
-    "  note " + shellQuote("Clé autorisée de la session recopiée sur le compte applicatif."),
+    "  note " +
+      shellQuote(
+        "Clé autorisée de la session recopiée sur le compte applicatif — c'est une copie figée : " +
+          `retirer cette clé de /root/.ssh/authorized_keys ne la retire pas de celui de ${UTILISATEUR_APPLICATIF}, ` +
+          "il faut l'y retirer aussi."
+      ),
     "  applique=oui",
     "fi",
   ]
@@ -611,14 +664,28 @@ function scriptPrepare(swapMo: number): string {
     ...sectionCompte(),
     ...sectionCle(),
     ...sectionPaquets(),
-    // Le fichier d'échange n'est produit que si le plan en demande un. `swap_mo: 0` ne veut
-    // pas dire « un échange de zéro octet », il veut dire « pas d'échange » — et la section
-    // entière disparaît alors du script plutôt que d'y rester en dormance.
-    ...(swapMo > 0 ? sectionSwap(swapMo) : []),
     ...sectionPareFeu(),
     ...sectionFail2ban(),
     ...sectionMisesAJour(),
     ...sectionGroupeDocker(),
+    // **Le fichier d'échange passe en dernier, après la couche de sécurité.** C'est la seule
+    // section dont l'échec ne dépend pas de nous : le noyau peut refuser `swapon` (fichier
+    // sur un système de fichiers qui ne le porte pas, hôte conteneurisé, `swapon` désactivé)
+    // et cet échec est fatal, comme tout autre. Placée avant, elle laissait la machine avec
+    // un compte applicatif créé, sa clé posée, son `NOPASSWD: ALL` actif — et **aucun
+    // pare-feu** : mesuré sur le banc, trois passages de suite rendaient `failed` avec
+    // `Status: inactive`, et la recette se déclare irréversible, donc l'exécuteur ne défait
+    // rien. C'est l'invariant n°4, le serveur laissé à mi-chemin.
+    //
+    // L'échec reste fatal plutôt que d'être avalé en simple note : le plan a demandé un
+    // fichier d'échange de taille précise, et rendre `applied` sans l'avoir posé ferait
+    // mentir le rapport. Ce qui change, c'est que ce `failed` porte désormais sur une
+    // machine entièrement sécurisée, et que rejouer l'étape est sans danger.
+    //
+    // `swap_mo: 0` ne veut pas dire « un échange de zéro octet », il veut dire « pas
+    // d'échange » — et la section entière disparaît alors du script plutôt que d'y rester
+    // en dormance.
+    ...(swapMo > 0 ? sectionSwap(swapMo) : []),
     "if [ \"$applique\" = oui ]; then",
     "  fin applied \"$detail\"",
     "fi",
