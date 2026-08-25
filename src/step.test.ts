@@ -268,6 +268,79 @@ describe("les scripts produits", () => {
       expect(() => verifieUnScript("env.write", "script", script, true)).not.toThrow()
     })
 
+    /**
+     * `<<` ne compte que hors guillemets. L'analyseur ouvrait un heredoc sur n'importe quel
+     * `<<MOT` de la ligne : la levée sur heredoc non refermé rattrapait la plupart des
+     * accidents, mais pas celui où le faux délimiteur coïncide avec un mot figurant seul
+     * plus loin — or `fi`, `done`, `esac` et `else` sont exactement de ces mots. Mesuré :
+     * le script ci-dessous était **accepté**, tout son corps sauté, `[[` et `rm -rf /`
+     * compris.
+     */
+    it.each([
+      ["fi", "echec 'la valeur << fi est atteinte'\n[[ -f /x ]]\nrm -rf /\nfi"],
+      ["done", 'note "compte << done atteint"\n[[ -f /x ]]\ndone'],
+      ["esac", "note 'motif << esac'\ndocker build . &> /dev/null\nesac"],
+      ["else", "note 'sinon << else'\nsource /etc/profile\nelse"],
+    ])("un `<<` cité ne peut pas ouvrir un faux heredoc jusqu'à `%s`", (_mot, corps) => {
+      const script = `${corps}\nprintf 'unchanged step.end\\n'`
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).toThrow(/contrôle/)
+    })
+
+    /**
+     * Le même défaut jouait dans l'autre sens, et c'est celui qui finit par faire
+     * contourner le garde-fou : un `<<FIN` cité dans un commentaire ouvrait un heredoc que
+     * rien ne fermait, et le harnais refusait un script parfaitement correct.
+     */
+    it("un `<<` en commentaire n'ouvre rien", () => {
+      const script = "# on écrirait ici avec cat <<FIN\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).not.toThrow()
+    })
+
+    it("un `<<` en commentaire ne masque pas le bashisme qui suit", () => {
+      const script = "# on écrirait ici avec cat <<FIN\ndocker build . &> /dev/null\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).toThrow(/bashisme/)
+    })
+
+    /** Un `#` au milieu d'un mot n'est pas un commentaire : `x=a#b` est une affectation. */
+    it("ne prend pas un `#` collé à un mot pour un commentaire", () => {
+      const script = "x=a#b\ndocker build . &> /dev/null\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).toThrow(/bashisme/)
+    })
+
+    /**
+     * Un guillemet simple protège tout ce qu'il enferme, double guillemet compris : c'est
+     * ce qui rend inoffensif l'`awk -F: '$1=="fpr" …'` de `host.install_docker`.
+     */
+    it("ne se laisse pas dérouter par un double guillemet cité", () => {
+      const script =
+        "empreinte=$(gpg --with-colons k | awk -F: '$1==\"fpr\" {print $10; exit}')\n" +
+        "docker build . &> /dev/null\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).toThrow(/bashisme/)
+    })
+
+    /**
+     * `<<<` doit ressortir intact : c'est un bashisme, et le laisser passer l'envoie à
+     * `dash -n`, qui le refuse pour de bon. Le prendre pour une ouverture ferait sauter
+     * tout ce qui suit — ici le `&>` de la ligne d'après.
+     */
+    it("ne prend pas `<<<` pour une ouverture de heredoc", () => {
+      const script = "grep x <<<FIN\ndocker build . &> /dev/null\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).toThrow(/bashisme/)
+    })
+
+    /** `$((1 << 2))` est un décalage arithmétique, pas une ouverture de heredoc. */
+    it("ne prend pas un décalage arithmétique pour un heredoc", () => {
+      const script = "n=$((1 << 2))\ndocker build . &> /dev/null\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).toThrow(/bashisme/)
+    })
+
     it("suit deux heredocs successifs et un heredoc indenté", () => {
       const deux = "cat > a <<A\nx=(1)\nA\ncat > b <<B\ny=(2)\nB\nprintf 'unchanged step.end\\n'"
       const indente = "cat > a <<-FIN\n\tx=(1)\n\tFIN\nprintf 'unchanged step.end\\n'"

@@ -192,6 +192,102 @@ const BASHISMES: ReadonlyArray<{ motif: RegExp; quoi: string }> = [
 ]
 
 /** Chaque contrôle du harnais, avec ce qu'il empêche, pour que l'échec se lise seul. */
+/** Ce qui, hors guillemets, ouvre un mot — et donc le seul endroit où `#` fait commentaire. */
+function separeLesMots(c: string): boolean {
+  return c === " " || c === "\t" || c === ";" || c === "&" || c === "|" || c === "("
+}
+
+/**
+ * Le délimiteur du heredoc que cette ligne ouvre, ou `null`.
+ *
+ * `<<` ne compte que **hors guillemets et hors commentaire**. Un suivi de citation en une
+ * passe suffit, et il est nécessaire : reconnaître un `<<` où qu'il tombe faisait sauter le
+ * corps d'un heredoc qui n'existe pas, jusqu'à un mot isolé qui ressemble au faux
+ * délimiteur. Or `fi`, `done`, `esac` et `else` sont exactement de ces mots — le faux corps
+ * avalé est alors du vrai shell. Mesuré : `echec 'la valeur << fi est atteinte'` suivi de
+ * `[[ -f /x ]]`, `rm -rf /` puis `fi` passait le harnais entier.
+ *
+ * Le même défaut jouait dans l'autre sens : un `<<FIN` cité dans un commentaire ouvrait un
+ * heredoc que rien ne fermait, et le harnais refusait un script correct — un garde-fou qui
+ * refuse du travail légitime finit contourné.
+ *
+ * `<<<` reste ignoré ici, délibérément : c'est un bashisme, et le laisser passer l'envoie à
+ * `dash -n`, qui le refuse pour de bon (`scripts/banc.sh check`). Une expression régulière
+ * ne saurait pas le distinguer d'un délimiteur de bloc marqué `# <<< skynode-… <<<`.
+ */
+function ouvertureHeredoc(ligne: string): string | null {
+  let i = 0
+  let debutDeMot = true
+
+  while (i < ligne.length) {
+    // `noUncheckedIndexedAccess` : l'indice est borné par la boucle, mais le dire au
+    // compilateur vaut mieux qu'une assertion qui mentirait le jour où la borne changerait.
+    const c = ligne[i]
+    if (c === undefined) break
+
+    // Une contre-oblique retire son sens au caractère suivant, quel qu'il soit.
+    if (c === "\\") {
+      i += 2
+      debutDeMot = false
+      continue
+    }
+
+    // Un guillemet simple protège tout ce qu'il enferme, y compris le double guillemet :
+    // c'est ce qui rend `awk -F: '$1=="fpr" …'` inoffensif pour ce suivi.
+    if (c === "'") {
+      const fin = ligne.indexOf("'", i + 1)
+      // Une citation qui ne se referme pas sur la ligne : on ne sait plus rien de la suite,
+      // et prétendre y lire une ouverture serait précisément l'erreur qu'on corrige.
+      if (fin === -1) return null
+      i = fin + 1
+      debutDeMot = false
+      continue
+    }
+
+    if (c === '"') {
+      i += 1
+      while (i < ligne.length && ligne[i] !== '"') i += ligne[i] === "\\" ? 2 : 1
+      if (i >= ligne.length) return null
+      i += 1
+      debutDeMot = false
+      continue
+    }
+
+    // Plus rien d'exécutable après : le reste de la ligne est un commentaire.
+    if (c === "#" && debutDeMot) return null
+
+    if (c === "<" && ligne[i + 1] === "<") {
+      const trouve = delimiteurApres(ligne, i + 2)
+      if (trouve !== null) return trouve
+      // Pas de délimiteur reconnaissable : un décalage arithmétique `$((1 << 2))`, ou un
+      // `<<<`, dont le troisième `<` n'est pas un début de délimiteur valide. Ce dernier
+      // ressort donc intact et atteint `dash -n`, seul juge capable de le distinguer d'un
+      // délimiteur de bloc marqué `# <<< skynode-… <<<` cité en argument de `grep`. La
+      // ligne peut encore ouvrir un vrai heredoc plus loin.
+      i += 2
+      debutDeMot = false
+      continue
+    }
+
+    debutDeMot = separeLesMots(c)
+    i += 1
+  }
+
+  return null
+}
+
+/** Le délimiteur qui suit un `<<` déjà reconnu : `<<-` toléré, délimiteur quoté ou nu. */
+function delimiteurApres(ligne: string, depart: number): string | null {
+  let j = depart
+  if (ligne[j] === "-") j += 1
+  while (ligne[j] === " " || ligne[j] === "\t") j += 1
+
+  const forme = /^(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/.exec(ligne.slice(j))
+  if (forme === null) return null
+
+  return forme[1] ?? forme[2] ?? forme[3] ?? null
+}
+
 /**
  * Le script débarrassé du corps de ses heredocs.
  *
@@ -219,13 +315,7 @@ function sansCorpsDeHeredoc(script: string): string {
     }
 
     gardees.push(ligne)
-
-    // `<<` ou `<<-`, suivi du délimiteur, éventuellement quoté. `<<<` est un bashisme et
-    // n'ouvre rien : le rejeter ici le laisse atteindre le contrôle qui le refuse.
-    const ouverture = /<<-?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/.exec(ligne)
-    if (ouverture && !ligne.includes("<<<")) {
-      delimiteur = ouverture[1] ?? ouverture[2] ?? ouverture[3] ?? null
-    }
+    delimiteur = ouvertureHeredoc(ligne)
   }
 
   if (delimiteur !== null) {
