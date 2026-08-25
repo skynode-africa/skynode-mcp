@@ -493,6 +493,35 @@ describe("les scripts", () => {
     })
   })
 
+  /**
+   * Ce que `sshd -T` doit rendre pour que le durcissement soit dit appliqué. Une mutation
+   * a montré qu'ajouter `yes` aux valeurs acceptées de `passwordauthentication` ne tuait
+   * aucun test : le produit aurait alors annoncé `applied` sur une machine dont le mot de
+   * passe reste ouvert, ce que toute cette conception vise précisément à empêcher.
+   */
+  describe("les valeurs attendues de sshd -T", () => {
+    it("n'accepte que le refus pour les deux authentifications", () => {
+      const comparaisons = SCRIPT_DURCIT.split("\n").filter((l) => l.includes('"$valeur" ='))
+
+      expect(comparaisons).toHaveLength(3)
+      expect(comparaisons[0]).toBe(`if [ "$valeur" = 'no' ]; then`)
+      expect(comparaisons[1]).toBe(`if [ "$valeur" = 'no' ]; then`)
+      // Aucune valeur attendue n'est `yes` : la seule apparition possible serait un
+      // élargissement de la table, qui ferait dire « appliqué » sur une porte restée ouverte.
+      expect(SCRIPT_DURCIT).not.toContain(`'yes'`)
+    })
+
+    /**
+     * `sshd -T` rend l'ancien alias : un fichier portant `prohibit-password` se relit
+     * `without-password`. N'accepter que la valeur écrite ferait annoncer un conflit sur
+     * toutes les machines — crier au loup sur la vérification qui justifie tout le reste.
+     */
+    it("accepte les deux écritures de la restriction de root", () => {
+      expect(SCRIPT_DURCIT).toContain("'prohibit-password'")
+      expect(SCRIPT_DURCIT).toContain("'without-password'")
+    })
+  })
+
   describe("le script de retrait", () => {
     it("retire le fichier et recharge", () => {
       expect(SCRIPT_RETRAIT).toContain(`rm -f ${CHEMIN_DURCISSEMENT}`)
@@ -502,6 +531,21 @@ describe("les scripts", () => {
     /** Un seul fichier à retirer : c'est toute la raison de ne pas toucher à `sshd_config`. */
     it("ne retire rien d'autre", () => {
       expect([...SCRIPT_RETRAIT.matchAll(/rm -f /g)]).toHaveLength(1)
+    })
+
+    /**
+     * Le `|| echec` n'est pas décoratif : `rm -f` rend 1 sur un fichier immuable, cas
+     * mesuré sur le banc. Sans cette garde, le retour arrière annoncerait avoir défait un
+     * durcissement toujours en place — et le client, croyant sa machine revenue à l'état
+     * d'avant, n'irait pas voir.
+     */
+    it("échoue si le retrait n'a pas pu avoir lieu", () => {
+      const ligne = SCRIPT_RETRAIT.split("\n").find((l) => l.startsWith("rm -f "))
+
+      expect(ligne).toBeDefined()
+      expect(ligne).toMatch(/^rm -f \S+ \|\| echec /)
+      // `|| true &&` rendrait la garde inopérante tout en gardant les deux mots.
+      expect(ligne).not.toContain("|| true")
     })
   })
 
