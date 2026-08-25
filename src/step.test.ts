@@ -210,6 +210,74 @@ describe("les scripts produits", () => {
   })
 
   /**
+   * Le corps d'un heredoc est une **donnée** — le contenu d'un fichier qu'on écrit — et
+   * n'est jamais exécuté comme du shell. Y chercher des bashismes refusait du travail
+   * légitime, et façonnait déjà le code de production : la règle sudoers de `host.prepare`
+   * a été écrite sans spécification d'exécutant en partie pour contourner `ALL=(`.
+   *
+   * Les tâches qui écrivent un Caddyfile, un `.env` ou un fichier de composition ne
+   * peuvent pas altérer ce qu'un client y met. Un garde-fou qui refuse leur travail
+   * finirait contourné, ce qui est pire que pas de garde-fou.
+   */
+  describe("le corps des heredocs", () => {
+    const ecrire = (contenu: string): string =>
+      `cat > /etc/skynode/x <<'FIN'\n${contenu}\nFIN\nprintf 'unchanged step.end\\n'`
+
+    it.each([
+      ["une variable valant `(a b)`", "OPTIONS=(a b)"],
+      ["une redirection `&>` dans un Caddyfile", "log { output file /var/log/a.log &> stderr }"],
+      ["un `source` dans un script du client", "source /opt/env.sh"],
+      ["une documentation citant `[[`", "# comparer avec [[ -f x ]]"],
+      ["un `local` dans une fonction du client", "f() { local x=1; }"],
+      ["un `function nom()`", "function demarrer() { :; }"],
+      ["une substitution de processus", "diff <(a) <(b)"],
+    ])("laisse passer %s", (_nom, contenu) => {
+      expect(() => verifieUnScript("env.write", "script", ecrire(contenu), true)).not.toThrow()
+    })
+
+    it.each([
+      ["avant tout heredoc", "docker build . &> /dev/null\ncat > a <<FIN\nx\nFIN"],
+      ["après un heredoc fermé", "cat > a <<FIN\nx\nFIN\ndocker build . &> /dev/null"],
+      ["sur la ligne d'ouverture elle-même", "cat > a <<FIN &> /dev/null\nx\nFIN"],
+    ])("refuse toujours un bashisme %s", (_nom, corps) => {
+      const script = `${corps}\nprintf 'unchanged step.end\\n'`
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).toThrow(/bashisme/)
+    })
+
+    /**
+     * Sans cela, tout ce qui suit l'ouverture serait avalé et un bashisme réel passerait.
+     * Et c'est de toute façon un script cassé : `sh` lirait jusqu'à la fin du fichier.
+     */
+    it("refuse un heredoc jamais refermé", () => {
+      const script = "cat > a <<FIN\ndonnee\ndocker build . &> /dev/null\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).toThrow(/referme jamais/)
+    })
+
+    /**
+     * `<<<` n'est **pas** cherché par le motif, et c'est délibéré : un délimiteur de bloc
+     * marqué s'écrit `# <<< skynode-… <<<`, cité en argument de `grep`. Le refuser ici
+     * ferait rejeter les scripts de SkyNode eux-mêmes — constaté sur `host.prepare` avec
+     * fichier d'échange. `dash -n` fait la distinction, pas une expression régulière.
+     */
+    it("laisse passer un délimiteur de bloc marqué", () => {
+      const script =
+        "grep -c -F -x -- '# <<< skynode-swap <<<' /etc/fstab\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", script, true)).not.toThrow()
+    })
+
+    it("suit deux heredocs successifs et un heredoc indenté", () => {
+      const deux = "cat > a <<A\nx=(1)\nA\ncat > b <<B\ny=(2)\nB\nprintf 'unchanged step.end\\n'"
+      const indente = "cat > a <<-FIN\n\tx=(1)\n\tFIN\nprintf 'unchanged step.end\\n'"
+
+      expect(() => verifieUnScript("env.write", "script", deux, true)).not.toThrow()
+      expect(() => verifieUnScript("env.write", "script", indente, true)).not.toThrow()
+    })
+  })
+
+  /**
    * Le script d'annulation ne s'emprunte qu'après l'échec d'une étape : c'est le chemin le
    * moins parcouru, et celui dont la défaillance produit le serveur laissé à mi-chemin que
    * l'invariant n°4 désigne comme le pire résultat possible. Il subit donc les mêmes

@@ -174,6 +174,12 @@ const BASHISMES: ReadonlyArray<{ motif: RegExp; quoi: string }> = [
   { motif: /(^|[;&|(\s])[A-Za-z_][A-Za-z0-9_]*=\(/m, quoi: "une affectation de tableau `nom=(…)`" },
   { motif: /(^|[;&|{\s])function\s+[A-Za-z_][A-Za-z0-9_]*\s*(\(\s*\))?\s*\{/m, quoi: "`function nom()`" },
   { motif: /[<>]\(/, quoi: "une substitution de processus `<(…)`" },
+  // Pas de motif pour la chaîne en entrée `<<<` : un délimiteur de bloc marqué s'écrit
+  // `# <<< skynode-… <<<`, et aucune expression régulière ne distingue ces octets, cités
+  // en argument de `grep`, d'une vraie redirection. `dash -n` le fait — il refuse `<<<`
+  // comme erreur de syntaxe et l'ignore entre guillemets — et `scripts/banc.sh check` le
+  // soumet à chaque script. C'est le partage voulu : le motif garde les formes que `dash`
+  // accepte en leur donnant un autre sens, `dash` garde celles qu'il refuse.
   // `source` comme commande, jamais comme fragment de chemin : `/usr/src/source.tar` ne
   // doit pas déclencher, `. fichier` est la forme POSIX à employer.
   { motif: /(^[ \t]*|[;&|{][ \t]*|\s&&\s|\s\|\|\s)source\s+\S/m, quoi: "`source` (utiliser `.`)" },
@@ -186,6 +192,55 @@ const BASHISMES: ReadonlyArray<{ motif: RegExp; quoi: string }> = [
 ]
 
 /** Chaque contrôle du harnais, avec ce qu'il empêche, pour que l'échec se lise seul. */
+/**
+ * Le script débarrassé du corps de ses heredocs.
+ *
+ * Un corps de heredoc est une **donnée** — le contenu d'un fichier qu'on écrit — et n'est
+ * jamais exécuté comme du shell. Y chercher des bashismes refuse du travail parfaitement
+ * légitime : mesuré, une variable d'environnement valant `X=(a b)`, un Caddyfile portant
+ * `&>`, un script du client contenant `source`, une documentation citant `[[`. Les tâches
+ * qui écrivent un Caddyfile, un `.env` ou un fichier de composition heurteraient donc le
+ * garde-fou sur des contenus qu'elles n'ont pas le droit d'altérer — et un garde-fou qui
+ * refuse du travail légitime finit contourné, ce qui est pire que pas de garde-fou.
+ *
+ * La ligne d'ouverture reste examinée : `cat > x <<'FIN'` est du shell, et une redirection
+ * fautive s'y verrait.
+ */
+function sansCorpsDeHeredoc(script: string): string {
+  const lignes = script.split("\n")
+  const gardees: string[] = []
+  let delimiteur: string | null = null
+
+  for (const ligne of lignes) {
+    if (delimiteur !== null) {
+      // Un délimiteur peut être indenté quand le heredoc s'ouvre par `<<-`.
+      if (ligne.trim() === delimiteur) delimiteur = null
+      continue
+    }
+
+    gardees.push(ligne)
+
+    // `<<` ou `<<-`, suivi du délimiteur, éventuellement quoté. `<<<` est un bashisme et
+    // n'ouvre rien : le rejeter ici le laisse atteindre le contrôle qui le refuse.
+    const ouverture = /<<-?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/.exec(ligne)
+    if (ouverture && !ligne.includes("<<<")) {
+      delimiteur = ouverture[1] ?? ouverture[2] ?? ouverture[3] ?? null
+    }
+  }
+
+  if (delimiteur !== null) {
+    // Un heredoc jamais fermé avalerait tout ce qui suit, y compris un bashisme réel. Et
+    // c'est de toute façon un script cassé : `sh` lirait jusqu'à la fin sans jamais
+    // exécuter la suite. Le signaler ici plutôt que de rendre un script tronqué.
+    throw new Error(
+      `Le script ouvre un heredoc « ${delimiteur} » qu'il ne referme jamais : tout ce qui suit ` +
+        "serait avalé au lieu d'être exécuté."
+    )
+  }
+
+  return gardees.join("\n")
+}
+
 const CONTROLES: ReadonlyArray<{
   nom: string
   verifie: (script: string) => boolean
@@ -206,7 +261,7 @@ const CONTROLES: ReadonlyArray<{
     // sens — sur le serveur du client, et jamais ici. Ce motif ne connaît que ce qu'on lui
     // a appris ; `scripts/banc.sh check` soumet le script au vrai `dash`, et c'est lui qui
     // fait autorité.
-    verifie: (s) => !BASHISMES.some(({ motif }) => motif.test(s)),
+    verifie: (s) => !BASHISMES.some(({ motif }) => motif.test(sansCorpsDeHeredoc(s))),
     pourquoi: "ces formes n'ont pas le même sens dans le `sh` du serveur, quand elles y sont valides",
     surUndo: true,
   },
@@ -215,7 +270,7 @@ const CONTROLES: ReadonlyArray<{
     // Une vraie RegExp, pas un motif reconstruit depuis un gabarit : dans un littéral de
     // gabarit JS, `\s` se réduit à un `s` littéral et le contrôle ne chercherait plus rien.
     // Désancré du début de ligne, sinon `f() { local x=1; }` passe.
-    verifie: (s) => !/(^[ \t]*|[;&|{][ \t]*)local\s/m.test(s),
+    verifie: (s) => !/(^[ \t]*|[;&|{][ \t]*)local\s/m.test(sansCorpsDeHeredoc(s)),
     pourquoi: "`local` n'est pas POSIX — accepté par `dash` mais pas par tous les `sh`",
     surUndo: true,
   },
