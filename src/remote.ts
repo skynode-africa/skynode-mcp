@@ -160,8 +160,28 @@ const HEREDOC = `${HEREDOC_PREFIX}_9f3a`
 /**
  * Un fichier que SkyNode possède entièrement : écrit par heredoc quoté (aucune expansion
  * de variable ou de substitution de commande dans le contenu), au mode demandé.
+ *
+ * **Le fragment se relit avant de rendre la main**, et son état de sortie est le verdict :
+ * il compte les octets réellement posés et les compare à ceux demandés. Sans ce contrôle,
+ * une écriture interrompue — disque plein, quota atteint, flux SSH coupé au milieu du
+ * heredoc — laissait un fichier tronqué que l'appelant installait tel quel. Mesuré sur le
+ * banc : `/etc/sudoers.d/90-skynode` réduit à sa ligne de commentaire, ce que `visudo -c`
+ * accepte parfaitement puisqu'un commentaire seul est un `sudoers` valide ; l'élévation du
+ * compte applicatif disparaissait sans qu'aucune commande n'ait rendu d'erreur.
+ *
+ * Le compte d'octets plutôt que l'état de `cat` : un heredoc dont le flux est coupé avant
+ * le délimiteur fait rendre **zéro** à `cat`, qui a bien écrit tout ce qu'il a reçu. Seule
+ * la taille distingue « tout écrit » de « écrit ce qui est arrivé ».
+ *
+ * Un fichier qui ne passe pas est retiré : mieux vaut l'absence, qui se voit, qu'une
+ * troncature qui se lit comme un fichier valide.
+ *
+ * `surEchec` est le fragment de shell à jouer alors — typiquement l'`echec …` du protocole
+ * d'étape, qui nomme le fichier dans le rapport. Par défaut `false`, pour que le fragment
+ * garde un état de sortie non nul même chez un appelant qui ne le regarde pas : ce module
+ * ne connaît pas le protocole d'étape et n'a pas à l'apprendre.
  */
-export function writeFileScript(path: string, content: string, mode: string): string {
+export function writeFileScript(path: string, content: string, mode: string, surEchec?: string): string {
   // Un contenu portant le délimiteur — ou un préfixe qui s'en approche — couperait le
   // heredoc en deux : tout ce qui suit dans le script deviendrait des commandes exécutées
   // sur la machine du client. Refuser plutôt que d'échapper : le délimiteur est un choix
@@ -203,6 +223,10 @@ export function writeFileScript(path: string, content: string, mode: string): st
   }
 
   const separator = content === "" || content.endsWith("\n") ? "" : "\n"
+  // Les octets, pas les caractères : un « é » en pèse deux, et comparer des longueurs de
+  // chaîne JavaScript à ce que compte `wc -c` ferait échouer toute écriture accentuée —
+  // or les fichiers posés par ce produit portent des commentaires en français.
+  const octets = new TextEncoder().encode(content + separator).length
 
   return (
     `mkdir -p ${shellQuote(dir)}\n` +
@@ -210,7 +234,12 @@ export function writeFileScript(path: string, content: string, mode: string): st
     content +
     separator +
     `${HEREDOC}\n` +
-    `chmod ${mode} ${shellQuote(path)}`
+    // `tr -d ' '` parce que le `wc` de BSD aligne son nombre sur huit colonnes là où celui
+    // de GNU ne rend que le nombre : sans lui, la comparaison échouerait sur la machine du
+    // développeur et réussirait chez le client, ce qui est le pire des deux sens.
+    `[ "$(wc -c < ${shellQuote(path)} 2>/dev/null | tr -d ' ')" = ${shellQuote(String(octets))} ]` +
+    ` && chmod ${mode} ${shellQuote(path)}` +
+    ` || { rm -f ${shellQuote(path)}; ${surEchec ?? "false"}; }`
   )
 }
 

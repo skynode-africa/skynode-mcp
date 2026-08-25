@@ -275,6 +275,86 @@ describe("writeFileScript > fidélité du contenu à l'octet (I1)", () => {
   })
 })
 
+describe("writeFileScript > écriture interrompue (C1)", () => {
+  /**
+   * Mesuré sur le banc : `cat` remplacé par un enrobage qui écrit une ligne puis sort en
+   * erreur — simulation fidèle d'un disque plein — laissait `/etc/sudoers.d/90-skynode`
+   * réduit à sa ligne de commentaire, ce que `visudo -c` accepte parfaitement, et l'étape
+   * annonçait `applied`. L'élévation du compte applicatif disparaissait sans qu'aucune
+   * commande n'ait rendu d'erreur.
+   */
+  const avecCatDefaillant = (script: string): { code: number; env: string } => {
+    const shim = mkdtempSync(join(tmpdir(), "sk-c1-shim-"))
+    try {
+      const faux = join(shim, "cat")
+      writeFileSync(faux, "#!/bin/sh\nhead -n 1\nexit 1\n", { mode: 0o755 })
+
+      try {
+        execFileSync("/bin/sh", ["-c", script], {
+          env: { ...process.env, PATH: `${shim}:${process.env["PATH"] ?? ""}` },
+          stdio: "ignore",
+        })
+        return { code: 0, env: shim }
+      } catch {
+        return { code: 1, env: shim }
+      }
+    } finally {
+      rmSync(shim, { recursive: true, force: true })
+    }
+  }
+
+  it("sort en erreur et ne laisse pas de fichier tronqué", () => {
+    const base = mkdtempSync(join(tmpdir(), "sk-c1-"))
+    try {
+      const cible = join(base, "regle.conf")
+      const { code } = avecCatDefaillant(writeFileScript(cible, "# entête\nla règle utile\n", "0600"))
+
+      expect(code).toBe(1)
+      // L'absence se voit ; une troncature se lit comme un fichier valide.
+      expect(existsSync(cible)).toBe(false)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * Le fragment ne connaît pas le protocole d'étape et n'a pas à l'apprendre : il rend un
+   * état de sortie, et l'appelant qui en a un lui confie la phrase du rapport.
+   */
+  it("joue le fragment d'échec que l'appelant lui confie", () => {
+    const s = writeFileScript("/etc/skynode/x.conf", "A=1\n", "0600", "echec 'perdu'")
+
+    expect(s).toContain("echec 'perdu'")
+    expect(s).not.toMatch(/;\s*false;\s*}/)
+  })
+
+  it("garde un état de sortie non nul quand l'appelant ne dit rien", () => {
+    expect(writeFileScript("/etc/skynode/x.conf", "A=1\n", "0600")).toContain("false; }")
+  })
+
+  /**
+   * Les **octets**, pas les caractères : les fichiers posés par ce produit portent des
+   * commentaires en français, et un « é » en pèse deux. Comparer des longueurs de chaîne
+   * JavaScript ferait échouer toute écriture accentuée — donc les trois fichiers de
+   * `host.prepare`.
+   */
+  it("compte les octets, pas les caractères", () => {
+    const s = writeFileScript("/etc/skynode/x.conf", "éé\n", "0600")
+
+    expect(s).toContain("= '5' ]")
+    expect(s).not.toContain("= '3' ]")
+  })
+
+  /**
+   * Le `wc` de BSD aligne son nombre sur huit colonnes là où celui de GNU ne rend que le
+   * nombre : sans le `tr`, la comparaison échouerait sur la machine du développeur et
+   * réussirait chez le client — le pire des deux sens.
+   */
+  it("normalise la sortie de wc", () => {
+    expect(writeFileScript("/etc/skynode/x.conf", "A=1\n", "0600")).toContain("| tr -d ' '")
+  })
+})
+
 describe("writeFileScript > répertoire parent sans '/' (I2)", () => {
   /**
    * `path.lastIndexOf("/")` rend `-1` quand `path` ne porte aucun `/` ; `slice(0, -1)`
