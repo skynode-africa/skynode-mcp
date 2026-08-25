@@ -637,4 +637,67 @@ describe("les deux étapes", () => {
   it("host.install_docker passe les quatre contrôles", () => {
     expect(() => verifieConformiteScript("host.install_docker", docker, ctx)).not.toThrow()
   })
+
+  /**
+   * Quatre mutations avaient survécu à la relecture faute d'assertion, sans que le code
+   * livré soit fautif. Un défaut qu'aucun test ne pince revient au premier remaniement.
+   */
+  describe("les modes et les gardes que rien ne pinçait", () => {
+    /**
+     * Un fichier d'échange lisible par tous expose **la mémoire des processus** : tout ce
+     * que le noyau y a écrit, mots de passe et jetons compris, devient lisible par
+     * n'importe quel compte de la machine.
+     */
+    it("restreint le fichier d'échange à 0600", () => {
+      const s = recipeFor("host.prepare").script(prepare(2048), ctx)
+
+      expect(s).toContain("chmod 0600 /swapfile")
+      expect(s.indexOf("chmod 0600 /swapfile")).toBeLessThan(s.indexOf("mkswap"))
+    })
+
+    /**
+     * `sudoers.d` en 0440, le mode qu'attend `sudo` : un fichier de règles inscriptible
+     * par un tiers ferait de l'élévation ce que ce tiers en déciderait.
+     */
+    it("pose la règle sudo en 0440", () => {
+      const s = recipeFor("host.prepare").script(prepare(0), ctx)
+      // La ligne d'installation du sudoers, et elle seule : les poses suivantes sont en
+      // 0644, ce qui est correct pour elles.
+      const pose = s
+        .split("\n")
+        .find((l) => l.includes("install ") && l.includes("/etc/sudoers.d/90-skynode"))
+
+      expect(pose).toBeDefined()
+      expect(pose).toMatch(/install -m 0440 /)
+    })
+
+    /**
+     * `host.install_docker` peut passer avant `host.prepare`, donc avant que le compte
+     * existe. `usermod` sur un compte absent échouerait l'étape entière ; l'absence doit
+     * valoir « rien à faire », et non « à faire ».
+     */
+    it("ne tente pas d'ajouter au groupe un compte qui n'existe pas", () => {
+      const s = recipeFor("host.install_docker").script(docker, ctx)
+      const garde = s.indexOf("id -u " + UTILISATEUR_APPLICATIF)
+      const usermod = s.indexOf("usermod")
+
+      expect(garde).toBeGreaterThan(-1)
+      expect(usermod).toBeGreaterThan(garde)
+      // La branche « compte absent » conclut `oui`, sinon l'étape resterait à faire pour
+      // toujours sur une machine où le compte ne sera créé que plus tard.
+      expect(s).toMatch(/else\n\s*groupe_ok=oui/)
+    })
+
+    /**
+     * L'idempotence de `poseFichier` : sans la comparaison, chaque passage réécrirait le
+     * fichier et rendrait `applied` pour toujours. L'invariant n°3 exige `unchanged`.
+     */
+    it("ne réécrit un fichier que s'il diffère", () => {
+      const s = recipeFor("host.prepare").script(prepare(0), ctx)
+      const comparaisons = [...s.matchAll(/cmp -s /g)].length
+
+      // Une par fichier posé : sudoers, fail2ban, apt.
+      expect(comparaisons).toBe(3)
+    })
+  })
 })
