@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { PlanStep } from "./plan-types.js"
 import type { StepContext } from "./step.js"
 import { recipeFor, verifieConformiteScript } from "./step.js"
+import { CHEMIN_DURCISSEMENT } from "./ssh-harden.js"
 import {
   CONFIG_FAIL2BAN,
   CONFIG_UNATTENDED,
@@ -516,6 +517,8 @@ describe("host.prepare", () => {
     expect(s).not.toContain("sshd_config")
     expect(s).not.toContain("PasswordAuthentication")
     expect(s).not.toContain("PermitRootLogin")
+    expect(s).not.toContain("KbdInteractiveAuthentication")
+    expect(s).not.toContain(CHEMIN_DURCISSEMENT)
     expect(s).not.toMatch(/systemctl (restart|reload|stop) ssh\b/)
   })
 
@@ -534,6 +537,29 @@ describe("host.prepare", () => {
   it("n'est pas réversible", () => {
     expect(recipeFor("host.prepare").undoScript(prepare(0), ctx)).toBeNull()
     expect(recipeFor("host.prepare").undoScript(prepare(2048), ctx)).toBeNull()
+  })
+
+  /**
+   * Le durcissement SSH ne peut pas être ce script : son filet exige d'ouvrir de vraies
+   * sessions en tant que compte applicatif, avant et après avoir coupé l'authentification
+   * par mot de passe. Sans ce drapeau, l'exécuteur enchaînerait sur l'étape suivante et le
+   * durcissement n'aurait jamais lieu — l'étape passerait pourtant pour complète, ce qui est
+   * exactement la promesse tenue à moitié que le jalon refuse.
+   */
+  it("réclame la seconde session que le durcissement SSH exige", () => {
+    expect(recipeFor("host.prepare").needsSecondSession).toBe(true)
+    // Le nom du compte à joindre par cette seconde session est celui que `sectionCle` vient
+    // de doter d'une clé : les deux valeurs ne peuvent pas diverger.
+    expect(UTILISATEUR_APPLICATIF).toBe("skynode")
+  })
+
+  /**
+   * `host.install_docker`, lui, n'a rien à vérifier par une seconde session. Le drapeau
+   * n'est pas décoratif : un exécuteur qui le lirait partout ouvrirait une session SSH de
+   * plus par étape, sur un compte qui peut ne pas exister encore.
+   */
+  it("est la seule des deux étapes à en réclamer une", () => {
+    expect(recipeFor("host.install_docker").needsSecondSession).toBeUndefined()
   })
 
   it("refuse une étape d'un autre type", () => {

@@ -717,6 +717,20 @@ export const RECETTE_HOST_PREPARE: StepRecipe = Object.freeze({
   // vient de poser, on ne supprime pas un compte qui fait peut-être déjà tourner quelque
   // chose. L'exécuteur le dira dans son rapport plutôt que de promettre un retour arrière.
   undoScript: (): null => null,
+  /**
+   * Le durcissement SSH suit cette étape, et **il ne peut pas être ce script**.
+   *
+   * Son filet exige d'ouvrir de vraies sessions SSH en tant que compte applicatif — avant de
+   * couper l'authentification par mot de passe, puis après l'avoir coupée — ce qu'un script
+   * envoyé dans une session ne sait pas faire. Ce drapeau dit à l'exécuteur d'appeler
+   * `hardenSsh` (`ssh-harden.ts`) après cette étape, avec le `SshRunner` qu'il est seul à
+   * détenir. Le compte visé est `UTILISATEUR_APPLICATIF`, celui que `sectionCle` vient de
+   * doter d'une clé.
+   *
+   * C'est aussi ce qui explique que ce script-ci ne touche ni à `sshd_config`, ni à
+   * `sshd_config.d/`, ni au service `ssh` : une directive glissée ici échapperait au filet.
+   */
+  needsSecondSession: true,
 })
 
 export const RECETTE_HOST_INSTALL_DOCKER: StepRecipe = Object.freeze({
