@@ -8,6 +8,7 @@ import { ALLOWED_NETWORK, APPLICATION_PATTERN, CADDY_CONTAINER, DOMAIN_PATTERN, 
 import type { ProjectFacts } from "./project-analyze.js"
 import type { ServerFacts } from "./probe.js"
 import type { Classification } from "./regime.js"
+import { BLOCAGE_DOCKER_INJOIGNABLE } from "./regime.js"
 
 /**
  * Composition d'un plan de déploiement à partir des deux constats du jalon 2.
@@ -103,7 +104,7 @@ export function composePlan(
   // `classify()` a déjà formulé (`regime.ts`), plutôt que composer une suite d'étapes
   // que `validatePlan` rejettera de toute façon.
   if (server.docker.present && !server.docker.usable) {
-    const blocage = classification.blockers.find((b) => b.includes("démon Docker"))
+    const blocage = classification.blockers.find((b) => b === BLOCAGE_DOCKER_INJOIGNABLE)
     return refuse(
       blocage ?? "Le démon Docker n'est pas joignable sur cette machine : aucune image ne peut y être construite.",
       [

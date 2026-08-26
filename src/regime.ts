@@ -68,13 +68,21 @@ function computeBlockers(facts: ServerFacts): string[] {
   }
 
   if (facts.docker.present && !facts.docker.usable) {
-    blockers.push(
-      "le démon Docker n'est pas joignable pour cet utilisateur ; il est arrêté, ou le compte n'est pas dans le groupe `docker`"
-    )
+    blockers.push(BLOCAGE_DOCKER_INJOIGNABLE)
   }
 
   return blockers
 }
+
+/**
+ * Le seul blocage que `plan-compose.ts` doit reconnaître pour l'attribuer à une cause
+ * précise. Exporté plutôt que recherché par sous-chaîne : `b.includes("démon Docker")`
+ * cessait de correspondre à la première reformulation de cette phrase, et le composeur
+ * retombait alors en silence sur un message générique — la divergence entre deux copies
+ * d'une même règle est ce qui a coûté le plus cher au jalon précédent.
+ */
+export const BLOCAGE_DOCKER_INJOIGNABLE =
+  "le démon Docker n'est pas joignable pour cet utilisateur ; il est arrêté, ou le compte n'est pas dans le groupe `docker`"
 
 export function classify(facts: ServerFacts): Classification {
   const blockers = computeBlockers(facts)
@@ -127,7 +135,10 @@ export function classify(facts: ServerFacts): Classification {
     return {
       regime: "inconnu",
       executable: false,
-      because: "Aucune élévation possible : ni `root` ni `sudo`, impossible d'installer quoi que ce soit sur cette machine.",
+      because:
+        "Le compte utilisé n'a pas d'élévation : ni `root`, ni `sudo` sans mot de passe. " +
+        "SkyNode ne peut donc rien installer ici. Connectez-vous en `root`, ou donnez à ce " +
+        "compte une règle `sudo` sans mot de passe, puis relancez le constat.",
       blockers,
       guidance: [
         "Fournissez un accès `root`, ou ajoutez l'utilisateur au fichier sudoers avec un droit NOPASSWD sur les commandes nécessaires.",
