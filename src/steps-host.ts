@@ -48,8 +48,15 @@ export const PORTS_ENTRANTS: readonly number[] = [22, 80, 443]
  */
 export const EMPREINTE_CLE_DOCKER = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 
-/** Là où SkyNode range ce qui lui appartient, fermé aux autres comptes. */
-const REPERTOIRE_SKYNODE = "/etc/skynode"
+/**
+ * Là où SkyNode range ce qui lui appartient, fermé aux autres comptes.
+ *
+ * Exporté pour les modules d'étapes suivants : ils y posent leurs propres répertoires et
+ * doivent pouvoir créer celui-ci **à son mode**, sans le recopier — un `/etc/skynode` créé
+ * en 0755 par un `install -d` de complaisance ouvrirait à tout compte de la machine des
+ * fichiers qui portent des secrets.
+ */
+export const REPERTOIRE_SKYNODE = "/etc/skynode"
 
 /**
  * Un fichier temporaire à chemin **littéral**, sous un répertoire en 0700 qui n'appartient
@@ -60,12 +67,16 @@ const REPERTOIRE_SKYNODE = "/etc/skynode"
 const brouillon = (nom: string): string => `${REPERTOIRE_SKYNODE}/.brouillon-${nom}`
 
 /**
- * Le préambule commun. `set -e` en est volontairement absent : chaque commande qui peut
+ * Le préambule commun **à tous les modules d'étapes**, exporté plutôt que recopié : deux
+ * copies d'un même protocole finissent par diverger, et c'est cette divergence-là qui a
+ * coûté le plus cher au jalon précédent (`plan-rules.ts`).
+ *
+ * `set -e` en est volontairement absent : chaque commande qui peut
  * échouer le dit elle-même par `|| echec …`, ce qui nomme la section fautive dans le
  * rapport. Sous `set -e`, le script mourrait sans rendre son marqueur de fin et
  * `runRemote` lirait une connexion coupée là où il n'y a qu'un paquet manquant.
  */
-const PREAMBULE: readonly string[] = [
+export const PREAMBULE: readonly string[] = [
   "set -u",
   "emit() { printf '%s\\t%s\\n' \"$1\" \"$2\"; }",
   "fin() { emit step.outcome \"$1\"; emit step.detail \"$2\"; emit step.end 1; exit 0; }",

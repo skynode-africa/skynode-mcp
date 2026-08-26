@@ -1,5 +1,6 @@
 import type { PlanStep, StepType } from "./plan-types.js"
 import { RECETTE_HOST_INSTALL_DOCKER, RECETTE_HOST_PREPARE } from "./steps-host.js"
+import { RECETTE_PROXY_CADDY_INSTALL, RECETTE_PROXY_CADDY_SITE } from "./steps-proxy.js"
 
 /**
  * Le protocole d'étape : ce qu'une recette doit rendre, et ce que le jalon garantit d'elle
@@ -113,12 +114,12 @@ function recetteAEcrire(type: StepType): StepRecipe {
 const RECIPES: Record<StepType, StepRecipe> = {
   "host.prepare": RECETTE_HOST_PREPARE,
   "host.install_docker": RECETTE_HOST_INSTALL_DOCKER,
-  "proxy.caddy.install": recetteAEcrire("proxy.caddy.install"),
+  "proxy.caddy.install": RECETTE_PROXY_CADDY_INSTALL,
   "build.generate_dockerfile": recetteAEcrire("build.generate_dockerfile"),
   "build.image": recetteAEcrire("build.image"),
   "env.write": recetteAEcrire("env.write"),
   "app.run": recetteAEcrire("app.run"),
-  "proxy.caddy.site": recetteAEcrire("proxy.caddy.site"),
+  "proxy.caddy.site": RECETTE_PROXY_CADDY_SITE,
   "state.record": recetteAEcrire("state.record"),
 }
 
@@ -158,7 +159,12 @@ export function recipeFor(type: PlanStep["type"]): StepRecipe {
  * soumise aux quatre contrôles — les oublier reviendrait à écrire un script d'écriture en
  * root que rien ne relit.
  */
-export const TYPES_IMPLEMENTES: readonly PlanStep["type"][] = ["host.prepare", "host.install_docker"]
+export const TYPES_IMPLEMENTES: readonly PlanStep["type"][] = [
+  "host.prepare",
+  "host.install_docker",
+  "proxy.caddy.install",
+  "proxy.caddy.site",
+]
 
 /**
  * Ce que `dash` — le `/bin/sh` de Debian et d'Ubuntu — refuse ou, pire, accepte en lui
