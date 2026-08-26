@@ -27,6 +27,12 @@ IMAGE_DOCKER="skynode-banc:docker"
 # Docker-dans-Docker a besoin d'un vrai système de fichiers pour son entrepôt d'images :
 # empilé sur l'overlay du conteneur, `dockerd` refuse de démarrer ou retombe sur `vfs`.
 VOLUME_DOCKER="skynode-banc-docker-lib"
+# Depuis Docker 29, l'entrepôt d'images est celui de containerd et ses instantanés vivent
+# sous `/var/lib/containerd`, plus sous `/var/lib/docker`. Laissé sur l'overlay du banc, il
+# empile un overlay sur un overlay : `docker run` échoue à monter la moindre image
+# (« failed to mount /tmp/containerd-mount… : invalid argument »), y compris sans montage lié.
+# Un second volume, pour la même raison que le premier.
+VOLUME_CONTAINERD="skynode-banc-docker-containerd"
 
 # La clé est jetable mais son chemin est stable : `ssh` et `down` doivent la retrouver sans
 # qu'on la leur passe, et `up` la régénère à chaque montage.
@@ -259,6 +265,7 @@ cmd_up() {
     # shellcheck disable=SC2086  # PRIVILEGES est une liste d'options, pas un seul argument.
     docker run -d --name "$name" $PRIVILEGES \
       -v "$VOLUME_DOCKER:/var/lib/docker" \
+      -v "$VOLUME_CONTAINERD:/var/lib/containerd" \
       -e SKYNODE_BANC_PUBKEY="$(cat "$key.pub")" \
       -p "$BIND_ADDR::22" "$image" \
       "$(start_command "$mode")" >/dev/null
@@ -312,7 +319,7 @@ cmd_down() {
   # portent rien du passage — ni clé, ni état — et les supprimer imposerait une réinstallation
   # de paquets d'une minute à chaque montage, ce qui découragerait justement de démonter.
   docker rm -f "$NAME_PLAIN" "$NAME_DOCKER" >/dev/null 2>&1 || true
-  docker volume rm -f "$VOLUME_DOCKER" >/dev/null 2>&1 || true
+  docker volume rm -f "$VOLUME_DOCKER" "$VOLUME_CONTAINERD" >/dev/null 2>&1 || true
   # Seul le `BANC_DIR` courant est effacé, faute de savoir où un autre `SKYNODE_BANC_DIR` a
   # pu poser ses clés. `down` est donc global sur les conteneurs et local sur les clés : le
   # dire, plutôt que de laisser une clé privée sur disque sous un « banc.demonte 1 » qui
