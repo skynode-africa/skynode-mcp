@@ -1,4 +1,5 @@
 import type { PlanStep, StepType } from "./plan-types.js"
+import { RECETTE_BUILD_GENERATE_DOCKERFILE, RECETTE_BUILD_IMAGE } from "./steps-build.js"
 import { RECETTE_HOST_INSTALL_DOCKER, RECETTE_HOST_PREPARE } from "./steps-host.js"
 import { RECETTE_PROXY_CADDY_INSTALL, RECETTE_PROXY_CADDY_SITE } from "./steps-proxy.js"
 
@@ -115,8 +116,8 @@ const RECIPES: Record<StepType, StepRecipe> = {
   "host.prepare": RECETTE_HOST_PREPARE,
   "host.install_docker": RECETTE_HOST_INSTALL_DOCKER,
   "proxy.caddy.install": RECETTE_PROXY_CADDY_INSTALL,
-  "build.generate_dockerfile": recetteAEcrire("build.generate_dockerfile"),
-  "build.image": recetteAEcrire("build.image"),
+  "build.generate_dockerfile": RECETTE_BUILD_GENERATE_DOCKERFILE,
+  "build.image": RECETTE_BUILD_IMAGE,
   "env.write": recetteAEcrire("env.write"),
   "app.run": recetteAEcrire("app.run"),
   "proxy.caddy.site": RECETTE_PROXY_CADDY_SITE,
@@ -164,6 +165,8 @@ export const TYPES_IMPLEMENTES: readonly PlanStep["type"][] = [
   "host.install_docker",
   "proxy.caddy.install",
   "proxy.caddy.site",
+  "build.generate_dockerfile",
+  "build.image",
 ]
 
 /**

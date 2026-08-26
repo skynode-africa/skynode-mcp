@@ -122,7 +122,14 @@ export function resolveSshTarget(instance: Instance, user?: string): SshTarget {
   return { host: instance.ipv4, user: candidate }
 }
 
-export function buildSshArgs(target: SshTarget): string[] {
+/**
+ * `distant` est ce que la session exécute une fois ouverte. Le défaut — `/bin/sh -s` — lit
+ * le script sur l'entrée standard, et c'est la forme qu'emploient la sonde et l'exécuteur.
+ * Le transfert, lui, a besoin de l'entrée standard pour l'archive elle-même : il passe donc
+ * son script en argument (`/bin/sh -c …`), **toujours en un seul élément de tableau**, sans
+ * qu'aucun interpréteur local ne le relise.
+ */
+export function buildSshArgs(target: SshTarget, distant: readonly string[] = ["/bin/sh", "-s"]): string[] {
   return [
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=10",
@@ -136,7 +143,7 @@ export function buildSshArgs(target: SshTarget): string[] {
     "-T",
     "-l", target.user,
     target.host,
-    "/bin/sh", "-s",
+    ...distant,
   ]
 }
 

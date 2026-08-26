@@ -1,6 +1,8 @@
+import type { PlanStep } from "./plan-types.js"
+
 /**
- * Règles partagées entre le composeur (`plan-compose.ts`) et le validateur
- * (`plan-validate.ts`).
+ * Règles partagées entre le composeur (`plan-compose.ts`), le validateur
+ * (`plan-validate.ts`) et les modules d'étapes (`steps-*.ts`).
  *
  * Avant ce module, chacun tenait sa propre copie de ces motifs — divergente sur le
  * domaine (le composeur acceptait les majuscules et n'importe quel TLD ; le validateur,
@@ -44,4 +46,40 @@ export function pathEscapes(path: string): boolean {
   if (path.startsWith("/")) return true
   if (path.split("/").includes("..")) return true
   return !PATH_PATTERN.test(path)
+}
+
+/* --------------------------------------------- garde-fous des recettes d'étapes --- */
+
+/**
+ * Refuse toute valeur qui n'a pas la forme imposée ci-dessus, **avant** qu'elle entre dans
+ * un script d'étape.
+ *
+ * `plan-validate.ts` contrôle déjà le domaine et `PlanSchema` le nom d'application, mais une
+ * recette est appelable directement : `recipeFor("proxy.caddy.site").script(…)` ne passe par
+ * aucun des deux. Ce contrôle-ci est donc celui qui **autorise** les interpolations des
+ * modules `steps-*.ts`, et c'est lui qu'il faut lire pour vérifier l'invariant n°1 du jalon.
+ *
+ * Il vit ici, et non dans chaque module d'étapes, pour la raison même qui a fait naître ce
+ * fichier : deux copies d'une règle finissent par diverger, et c'est cette divergence-là qui
+ * a coûté le plus cher au jalon précédent.
+ */
+export function exigeMotif(valeur: string, motif: RegExp, quoi: string): string {
+  if (!motif.test(valeur)) {
+    throw new Error(`« ${valeur} » n'est pas ${quoi} : aucun script ne peut être composé avec cette valeur.`)
+  }
+
+  return valeur
+}
+
+/**
+ * Une recette ne doit jamais lire une étape d'un autre type : les champs qu'elle attend n'y
+ * seraient pas, et TypeScript ne protège pas un exécuteur qui aurait perdu le lien entre le
+ * type et la recette.
+ */
+export function exigeType<T extends PlanStep["type"]>(step: PlanStep, type: T): Extract<PlanStep, { type: T }> {
+  if (step.type !== type) {
+    throw new Error(`La recette de « ${type} » a reçu une étape de type « ${step.type} ».`)
+  }
+
+  return step as Extract<PlanStep, { type: T }>
 }
