@@ -74,6 +74,15 @@ export function formatExecReport(report: ExecReport, plan?: Plan): string {
 
     lignes.push(`${etape.index + 1}. [${SYMBOLE[etape.outcome]}${defait}] ${quoi}`)
     if (etape.detail !== "") lignes.push(`   ${borne(etape.detail)}`)
+
+    // Le durcissement SSH se lit sur sa propre ligne : il n'est pas le fait du script de
+    // l'étape, et son échec — le seul du produit qui soit irréparable à distance s'il
+    // tournait mal — ne doit pas se confondre avec le reste du compte rendu.
+    if (etape.durcissement !== undefined) {
+      lignes.push(
+        `   [SSH ${SYMBOLE[etape.durcissement.outcome]}] ${borne(etape.durcissement.detail)}`
+      )
+    }
   })
 
   if (report.residue.length > 0) {

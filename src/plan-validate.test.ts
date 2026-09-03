@@ -133,7 +133,10 @@ function plan(overrides: Partial<Plan> = {}): Plan {
       { type: "state.record" },
     ],
     hors_perimetre: ["aucune sauvegarde n'est configurée"],
-    reversible: true,
+    // `false`, et non `true` : ce plan porte `host.prepare` et `host.install_docker`, que
+    // `step.ts` déclare irréversibles. Le jeu d'essai affirmait le contraire — la même
+    // contradiction que le composeur écrivait en dur, et que ce module refuse désormais.
+    reversible: false,
     ...overrides,
   } as Plan
 }
@@ -160,6 +163,8 @@ describe("validatePlan — ce qui passe", () => {
     const p = plan({
       regime: "skynode",
       empreinte_etat: computeFingerprint(f, c),
+      // Celui-ci l'est vraiment : aucune de ses trois étapes n'est définitive.
+      reversible: true,
       etapes: [
         { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
         { type: "app.run", port_interne: 3000, reseau: "skynode" },
@@ -494,6 +499,8 @@ describe("validatePlan — correctif I4 : Docker présent mais inutilisable", ()
     const p = plan({
       regime: "docker",
       empreinte_etat: computeFingerprint(f, c),
+      // Celui-ci l'est vraiment : aucune de ses trois étapes n'est définitive.
+      reversible: true,
       etapes: [
         { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
         { type: "app.run", port_interne: 3000, reseau: "skynode" },
@@ -608,5 +615,95 @@ describe("validatePlan — correctif I5 : une étape malformée rend une violati
 
     expect(() => validatePlan(p, facts(), classification())).not.toThrow()
     expect(regles(p)).toContain("bornes")
+  })
+})
+
+/**
+ * Le champ `reversible` du plan et ce que ses étapes savent défaire ne peuvent pas diverger.
+ *
+ * Il était écrit en dur à `true` par le composeur, si bien que tout plan portant
+ * `host.prepare` ou `host.install_docker` s'annonçait réversible à celui qui l'approuvait —
+ * sur la phrase même qui décide s'il ose déployer.
+ */
+describe("validatePlan — le champ reversible ne peut pas mentir", () => {
+  it("refuse un plan qui se dit réversible en installant Docker", () => {
+    const p = plan({ reversible: true })
+
+    expect(regles(p)).toContain("contradiction")
+  })
+
+  it("refuse un plan qui se dit irréversible alors que tout se défait", () => {
+    const f = facts({
+      skynode: { present: true, raw: "{}" },
+      docker: { present: true, usable: true, version: "", compose: true, networks: [],
+                containers: [{ name: "skynode-caddy", image: "caddy:2", state: "running", ports: "" }] },
+    })
+    const c = classification({ regime: "skynode" })
+    const p = plan({
+      regime: "skynode",
+      empreinte_etat: computeFingerprint(f, c),
+      reversible: false,
+      etapes: [
+        { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+        { type: "app.run", port_interne: 3000, reseau: "skynode" },
+        { type: "state.record" },
+      ],
+    })
+
+    expect(regles(p, f, c)).toContain("contradiction")
+  })
+})
+
+/**
+ * Le gabarit engendré fixe `ENV PORT` et `EXPOSE` sur son port ; `app.run` étiquette le
+ * conteneur avec le sien, et c'est cette étiquette que `proxy.caddy.site` relit pour router.
+ * Désaccordés, Caddy frappe une porte que l'application n'ouvre pas — un 502 que ni le plan
+ * ni le rapport d'exécution n'expliquent.
+ *
+ * Le composeur tire les deux de la même valeur ; un plan resoumis (spec §5.1) n'y est pas tenu.
+ */
+describe("validatePlan — les deux ports doivent s'accorder", () => {
+  const avecGabarit = (portGabarit: number, portConteneur: number): Plan =>
+    plan({
+      reversible: false,
+      etapes: [
+        { type: "host.prepare", swap_mo: 0 },
+        { type: "host.install_docker" },
+        {
+          type: "build.generate_dockerfile",
+          famille: "node",
+          version: "22",
+          gestionnaire: "pnpm",
+          sortie: "server",
+          port: portGabarit,
+        },
+        { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+        { type: "app.run", port_interne: portConteneur, reseau: "skynode" },
+        { type: "state.record" },
+      ],
+    })
+
+  it("accepte deux ports identiques", () => {
+    expect(regles(avecGabarit(3000, 3000))).not.toContain("contradiction")
+  })
+
+  it("refuse un conteneur étiqueté sur un port que le Dockerfile n'ouvre pas", () => {
+    expect(regles(avecGabarit(3000, 8080))).toContain("contradiction")
+  })
+
+  /** Sans gabarit engendré, le Dockerfile est celui du développeur : rien à confronter. */
+  it("ne confronte rien quand le plan n'engendre pas de Dockerfile", () => {
+    const p = plan({
+      reversible: false,
+      etapes: [
+        { type: "host.prepare", swap_mo: 0 },
+        { type: "host.install_docker" },
+        { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
+        { type: "app.run", port_interne: 8080, reseau: "skynode" },
+        { type: "state.record" },
+      ],
+    })
+
+    expect(regles(p)).not.toContain("contradiction")
   })
 })

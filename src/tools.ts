@@ -266,7 +266,7 @@ export function registerTools(
           )
         }
 
-        return text(formatPlan(composed.plan))
+        return text(formatPlan(composed.plan, instance))
       })
   )
 
@@ -316,6 +316,21 @@ export function registerTools(
         const propre = parsePlan(plan)
 
         const instance = await api.getInstance(server_id)
+
+        // **Le plan a été composé pour une machine nommée, et c'est celle-là qu'on déploie.**
+        // L'empreinte d'état ne suffit pas à le garantir : elle est structurelle — régime,
+        // Docker, Caddy, binaires, ports — et deux VPS neufs de la même image la partagent.
+        // Un plan approuvé pour la vitrine s'appliquerait donc en root sur la boutique sans
+        // que rien ne le remarque.
+        if (propre.serveur !== instance.id) {
+          return failure(
+            `Ce plan a été composé pour le serveur ${propre.serveur}, pas pour ${instance.id} ` +
+              `(${instance.hostname}). Rien n’a été exécuté. Recomposez le plan avec ` +
+              "plan_deployment sur le serveur visé : l’état d’une machine ne se déduit pas de " +
+              "celui d’une autre, même identique en apparence."
+          )
+        }
+
         const target = resolveSshTarget(instance)
 
         // La sonde tourne même en simulation : c'est elle qui dit si le plan décrit encore

@@ -68,6 +68,14 @@ export const LIGNES_JOURNAL = 60
  */
 export const REPERTOIRE_STATIQUE_PAR_DEFAUT = "dist"
 
+/**
+ * Le seul `source.path` que le produit sait honorer : la racine du projet.
+ *
+ * `plan-compose.ts` n'en émet jamais d'autre, mais un plan n'est pas tenu de venir de lui
+ * (spec §5.1) — c'est la recette qui doit refuser, pas le composeur qui doit bien se tenir.
+ */
+export const RACINE_PROJET = "."
+
 const q = shellQuote
 
 /* ------------------------------------------------------------------------- garde-fous --- */
@@ -111,6 +119,20 @@ export function depotImage(application: string): string {
 export function exigeSourceLocale(step: Extract<PlanStep, { type: "build.image" }>): void {
   switch (step.source.type) {
     case "local":
+      // **Et le chemin, pas seulement le type.** `plan-render.ts` écrit « construire l'image
+      // X depuis <path> » : c'est ce texte que le développeur approuve. Or le transfert
+      // envoie la racine du projet entière et rien d'autre — un `path` de sous-répertoire
+      // ferait approuver « depuis apps/web » et construire le dépôt complet. Tant que le
+      // transfert ne sait pas viser un sous-arbre, le seul chemin honnête est la racine.
+      if (step.source.path !== RACINE_PROJET) {
+        throw new Error(
+          `La construction depuis « ${step.source.path} » n'est pas encore possible : le projet est ` +
+            "transféré depuis sa racine, et ce plan annoncerait un sous-répertoire que rien " +
+            `n'irait chercher. Composer le plan avec « ${RACINE_PROJET} », ou déployer ce ` +
+            "sous-projet depuis sa propre racine."
+        )
+      }
+
       return
     default: {
       const inconnue: never = step.source.type
@@ -130,6 +152,36 @@ export function exigeSourceLocale(step: Extract<PlanStep, { type: "build.image" 
  * Sans cet accès, le transfert exclurait `dist` et le gabarit statique recopierait un
  * répertoire absent.
  */
+/**
+ * Refuse une étiquette que l'étape ne posera pas.
+ *
+ * `depotImage` dérive le dépôt de `ctx.application` — pour de bonnes raisons, expliquées
+ * plus haut — et ignore `etape.tag`. Mais `plan-render.ts` **montre** `etape.tag` au
+ * développeur, et `plan-validate.ts` ne borne cette valeur qu'à la forme `skynode/…` sans
+ * la rattacher à l'application. Un plan déclarant `skynode/autre` ferait donc approuver la
+ * construction d'une image, et en construirait une autre. On refuse plutôt que de laisser
+ * diverger le texte approuvé et le geste posé.
+ */
+export function exigeEtiquetteAttendue(
+  step: Extract<PlanStep, { type: "build.image" }>,
+  application: string
+): void {
+  const attendu = depotImage(application)
+
+  // Le plan peut nommer le dépôt seul (`skynode/boutique`) ou porter une étiquette
+  // explicite (`skynode/boutique:latest`) : c'est le dépôt qui doit coïncider, l'étiquette
+  // effective étant toujours le condensat du contenu transféré.
+  const depotDeclare = step.tag.includes(":") ? step.tag.slice(0, step.tag.indexOf(":")) : step.tag
+
+  if (depotDeclare !== attendu) {
+    throw new Error(
+      `Le plan annonce l'image « ${step.tag} » alors que l'application « ${application} » produit ` +
+        `« ${attendu} » : le texte approuvé et l'image construite ne coïncideraient pas. ` +
+        "Recomposer le plan pour cette application."
+    )
+  }
+}
+
 export function repertoireAPreserver(step: PlanStep): string | null {
   if (step.type !== "build.generate_dockerfile") return null
 
@@ -475,12 +527,16 @@ export const RECETTE_BUILD_GENERATE_DOCKERFILE: StepRecipe = Object.freeze({
 
 export const RECETTE_BUILD_IMAGE: StepRecipe = Object.freeze({
   script(step: PlanStep, ctx: StepContext): string {
-    exigeSourceLocale(exigeType(step, "build.image"))
+    const etape = exigeType(step, "build.image")
+    exigeSourceLocale(etape)
+    exigeEtiquetteAttendue(etape, ctx.application)
 
     return scriptImage(ctx.application, exigeRepertoireDeTravail(ctx.workDir))
   },
   undoScript(step: PlanStep, ctx: StepContext): string {
-    exigeSourceLocale(exigeType(step, "build.image"))
+    const etape = exigeType(step, "build.image")
+    exigeSourceLocale(etape)
+    exigeEtiquetteAttendue(etape, ctx.application)
 
     return scriptImageUndo(ctx.application, exigeRepertoireDeTravail(ctx.workDir))
   },

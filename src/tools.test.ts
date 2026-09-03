@@ -372,6 +372,26 @@ describe("registerTools", () => {
     })
   })
 
+  /**
+   * Un plan qu'on approuve sans savoir sur quelle machine il s'appliquera n'est pas
+   * approuvé. Le nom, l'adresse et l'identifiant y figurent tous les trois : le nom pour
+   * l'humain, l'identifiant parce que c'est lui qu'`apply_plan` confronte.
+   */
+  it("nomme le serveur dans le plan rendu", async () => {
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, fakeSsh())
+    const out = (await tools.get("plan_deployment")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      application: "boutique",
+    } as never)) as { content: { text: string }[] }
+
+    const texte = out.content[0]?.text ?? ""
+
+    expect(texte).toContain(instance.hostname)
+    expect(texte).toContain(instance.ipv4)
+    expect(texte).toContain(instance.id)
+  })
+
   /** Le plan rendu doit être lisible, pas du JSON — c'est lui que le développeur approuve. */
   it("rend un texte français, jamais le JSON du plan", async () => {
     const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, fakeSsh())
@@ -496,6 +516,43 @@ describe("apply_plan", () => {
     expect(vus.every((script) => !script.includes("step.end"))).toBe(true)
     expect(texteDe(out)).toMatch(/empreinte/i)
     expect(texteDe(out)).toMatch(/[Rr]ien n’a été exécuté|[Rr]ien n'a été exécuté/)
+  })
+
+  /**
+   * L'empreinte d'état est structurelle — régime, Docker, Caddy, binaires, ports — et deux
+   * VPS neufs de la même image la partagent. Elle ne rattache donc pas un plan à SA machine :
+   * seul l'identifiant le fait. Sans ce contrôle, un plan approuvé pour la vitrine
+   * s'appliquerait en root sur la boutique sans que rien ne le remarque.
+   */
+  it("refuse un plan composé pour un autre serveur, sans ouvrir de session", async () => {
+    const vus: string[] = []
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, sshQuiApplique(vus))
+
+    const out = (await tools.get("apply_plan")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      plan: { ...(await planValide()), serveur: "9c8b7a65-4321-0fed-cba9-876543210fed" },
+    } as never)) as { isError?: boolean }
+
+    expect(vus).toEqual([])
+    expect(out.isError).toBe(true)
+    expect(texteDe(out)).toMatch(/composé pour le serveur/)
+  })
+
+  /** Le contrôle vaut aussi en simulation : une simulation sur la mauvaise machine ment. */
+  it("refuse un plan d'un autre serveur même en simulation", async () => {
+    const vus: string[] = []
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, sshQuiApplique(vus))
+
+    const out = (await tools.get("apply_plan")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      plan: { ...(await planValide()), serveur: "9c8b7a65-4321-0fed-cba9-876543210fed" },
+      dry_run: true,
+    } as never)) as { isError?: boolean }
+
+    expect(vus).toEqual([])
+    expect(out.isError).toBe(true)
   })
 
   /** `dry_run` doit être atteignable sans rien risquer : c'est ce qui le rend utile. */

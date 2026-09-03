@@ -8,8 +8,10 @@ import {
   IMAGES_CONSERVEES,
   LIGNES_JOURNAL,
   LONGUEUR_CONDENSAT,
+  RACINE_PROJET,
   REPERTOIRE_STATIQUE_PAR_DEFAUT,
   depotImage,
+  exigeEtiquetteAttendue,
   exigeSourceLocale,
   repertoireAPreserver,
 } from "./steps-build.js"
@@ -385,4 +387,50 @@ describe("le harnais de conformité", () => {
       }
     }
   )
+})
+
+/* ------------------------------------------- ce que le plan promet et ce qu'on fait --- */
+
+/**
+ * `plan-render.ts` montre au développeur « construire l'image <tag> depuis <path> », et
+ * c'est ce texte-là, et lui seul, qu'il approuve. Or la recette dérive le dépôt de
+ * `ctx.application` et transfère toujours la racine du projet : les deux champs rendus
+ * étaient donc **décoratifs**. Un plan pouvait faire approuver une image et en construire
+ * une autre, ou annoncer un sous-répertoire que rien n'irait chercher.
+ *
+ * `plan-validate.ts` ne fermait ni l'un ni l'autre : il borne `tag` à la forme « skynode/… »
+ * sans le rattacher à l'application, et `path` à un chemin qui ne s'échappe pas.
+ */
+describe("le texte approuvé et le geste posé", () => {
+  const etapeAvec = (tag: string, path = "."): PlanStep => ({
+    type: "build.image",
+    source: { type: "local", path },
+    tag,
+  })
+
+  it("accepte le dépôt de l'application, avec ou sans étiquette explicite", () => {
+    expect(() => exigeEtiquetteAttendue(etapeAvec("skynode/boutique") as never, "boutique")).not.toThrow()
+    expect(() => exigeEtiquetteAttendue(etapeAvec("skynode/boutique:latest") as never, "boutique")).not.toThrow()
+  })
+
+  it("refuse un dépôt qui n'est pas celui de l'application", () => {
+    expect(() => exigeEtiquetteAttendue(etapeAvec("skynode/autre") as never, "boutique")).toThrow(/coïncider/)
+  })
+
+  it("refuse une construction depuis un sous-répertoire, que rien n'irait chercher", () => {
+    expect(() => exigeSourceLocale(etapeAvec("skynode/boutique", "apps/web") as never)).toThrow(/racine/)
+  })
+
+  it("accepte la racine du projet", () => {
+    expect(() => exigeSourceLocale(etapeAvec("skynode/boutique", RACINE_PROJET) as never)).not.toThrow()
+  })
+
+  /** Les deux gardes sont sur le chemin de la recette : elles ne se contournent pas. */
+  it("fait échouer la recette, pas seulement les fonctions prises à part", () => {
+    const ctx = { application: "boutique", projectRoot: "/x", workDir: "/opt/skynode/work/boutique" }
+
+    expect(() => recipeFor("build.image").script(etapeAvec("skynode/autre"), ctx)).toThrow()
+    expect(() => recipeFor("build.image").script(etapeAvec("skynode/boutique", "apps/web"), ctx)).toThrow()
+    expect(() => recipeFor("build.image").undoScript(etapeAvec("skynode/autre"), ctx)).toThrow()
+  })
 })

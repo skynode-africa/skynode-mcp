@@ -97,7 +97,8 @@ quand il n'y a rien à faire. Réappliquer un plan déjà appliqué ne coupe pas
 
 **Une machine modifiée entre-temps fait refuser le plan.** Le plan porte une empreinte de
 l'état constaté ; si quoi que ce soit a changé depuis, il est refusé **sans qu'une seule
-étape ne s'exécute**. Ce que vous aviez approuvé décrivait un serveur qui n'existe plus.
+étape ne s'exécute**. Ce que vous aviez approuvé décrivait un serveur qui n'existe plus. Un
+plan destiné à un autre serveur est refusé de la même façon, et pour la même raison.
 
 `dry_run` décrit tout cela sans ouvrir la moindre session.
 
@@ -119,7 +120,11 @@ rien.
   la construction en plusieurs étapes, l'utilisateur non-root et le cache des dépendances
   sont les mêmes pour tous les clients, donc corrigés une fois pour tous.
 - **Le plan vous est rendu en français**, étape par étape, jamais sous forme de données à
-  déchiffrer. C'est ce texte-là que vous approuverez.
+  déchiffrer. C'est ce texte-là que vous approuvez — il nomme le serveur visé, l'application,
+  le domaine, et **ce qui restera sur la machine** même si une étape échoue plus loin.
+- **Un plan appartient au serveur pour lequel il a été composé.** `apply_plan` refuse de
+  l'appliquer ailleurs : deux VPS neufs de la même image se ressemblent trop pour qu'une
+  empreinte d'état suffise à les distinguer.
 
 ## Le compte applicatif, et sa clé
 

@@ -10,7 +10,9 @@ import {
   type StepContext,
   type StepRecipe,
 } from "./step.js"
+import { hardenSsh, type HardenResult } from "./ssh-harden.js"
 import { repertoireAPreserver } from "./steps-build.js"
+import { UTILISATEUR_APPLICATIF } from "./steps-host.js"
 import { transferProject, type TransferResult } from "./transfer.js"
 
 /**
@@ -58,6 +60,12 @@ export interface StepReport {
   detail: string
   /** Rempli seulement quand l'exécuteur a tenté de défaire cette étape. */
   undone?: "done" | "impossible" | "failed"
+  /**
+   * Le durcissement SSH, quand l'étape l'a réclamé par `needsSecondSession`. Il est rendu
+   * à part de `detail` parce qu'il n'est pas le fait du script de l'étape : il ouvre ses
+   * propres sessions, et son échec doit pouvoir se lire sans être confondu avec le reste.
+   */
+  durcissement?: { outcome: Outcome; detail: string }
 }
 
 /** Le transfert préalable, quand le plan en a eu besoin. Absent sinon, et absent en `dryRun`. */
@@ -83,9 +91,17 @@ export type TransferFn = (
   preserveDir: string | null
 ) => Promise<TransferResult>
 
+/** Ce que l'exécuteur appelle pour durcir SSH, injectable pour que les tests n'ouvrent rien. */
+export type HardenFn = (
+  ssh: SshRunner,
+  cible: SshTarget,
+  utilisateur: string
+) => Promise<HardenResult>
+
 export interface ExecOptions {
   dryRun: boolean
   transfer?: TransferFn
+  harden?: HardenFn
   /**
    * La recette d'un type, `recipeFor` par défaut. Injectable pour la même raison que
    * `transfer` : c'est le seul moyen d'éprouver que l'exécuteur **refuse** un script non
@@ -275,6 +291,31 @@ export async function executePlan(
     // Seules les étapes qui ont **changé** quelque chose entrent dans la pile : défaire une
     // étape restée `unchanged` retirerait quelque chose qu'on n'a pas posé.
     if (resultat.outcome === "applied") aDefaire.push(prete)
+
+    // Le durcissement SSH ne peut pas être un script d'étape : son filet exige d'ouvrir de
+    // vraies sessions en tant que compte applicatif, avant puis après avoir coupé le mot de
+    // passe. La recette le déclare, l'exécuteur — seul à détenir le `SshRunner` — l'exécute.
+    //
+    // Il se joue aussi après un `unchanged` : une machine déjà préparée peut très bien
+    // n'avoir jamais été durcie, parce qu'un passage précédent s'est arrêté ici même.
+    // `hardenSsh` est idempotent, le rejouer ne coûte que trois sessions.
+    if (recipeFor(prete.step.type).needsSecondSession === true) {
+      const durcir = options.harden ?? hardenSsh
+      const durcissement = await durcir(ssh, target, UTILISATEUR_APPLICATIF)
+      const rapport = steps[steps.length - 1]
+      if (rapport !== undefined) {
+        rapport.durcissement = { outcome: durcissement.outcome, detail: durcissement.detail }
+      }
+
+      // Un durcissement en échec arrête le plan. `hardenSsh` a déjà retiré son fichier et
+      // vérifié que la porte se rouvre : la machine est dans l'état d'avant, et poursuivre
+      // livrerait une application sur un serveur dont on sait qu'on n'a pas su fermer la
+      // porte — la promesse faite au client, précisément.
+      if (durcissement.outcome === "failed") {
+        echoue = true
+        break
+      }
+    }
   }
 
   if (!echoue) {

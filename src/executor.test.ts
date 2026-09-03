@@ -2,7 +2,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it, vi } from "vitest"
 
-import { executePlan, repertoireDeTravail, type ExecReport, type TransferFn } from "./executor.js"
+import { executePlan, repertoireDeTravail, type ExecReport, type HardenFn, type TransferFn } from "./executor.js"
 import type { Plan, PlanStep } from "./plan-types.js"
 import type { SshResult, SshRunner, SshTarget } from "./ssh.js"
 import type { StepRecipe } from "./step.js"
@@ -100,8 +100,20 @@ function serveur(reponse: (etiquette: string) => SshResult, vus?: string[]): Ssh
   }
 }
 
-const joue = (p: Plan, ssh: SshRunner, dryRun = false, transfer: TransferFn = transfertReussi): Promise<ExecReport> =>
-  executePlan(p, ssh, CIBLE, CTX, { dryRun, transfer })
+/** Le durcissement est injecté : aucun test n'ouvre de vraie session vers un vrai hôte. */
+const durcissementReussi: HardenFn = async () => ({
+  outcome: "applied",
+  detail: "Mot de passe et connexion root directe refusés.",
+  diagnostic: "",
+})
+
+const joue = (
+  p: Plan,
+  ssh: SshRunner,
+  dryRun = false,
+  transfer: TransferFn = transfertReussi,
+  harden: HardenFn = durcissementReussi
+): Promise<ExecReport> => executePlan(p, ssh, CIBLE, CTX, { dryRun, transfer, harden })
 
 /* --------------------------------------------------------------- le chemin nominal --- */
 
@@ -388,5 +400,99 @@ describe("executePlan — le retour arrière", () => {
     await joue(plan(), serveur((t) => (t === "build.image" ? echec("x") : ok()), vus))
 
     expect(vus).not.toContain("app.run")
+  })
+})
+
+/* ------------------------------------------------------------- le durcissement SSH --- */
+
+/**
+ * Le durcissement SSH ne peut pas être un script d'étape : son filet exige d'ouvrir de
+ * vraies sessions en tant que compte applicatif, avant puis après avoir coupé le mot de
+ * passe. La recette de `host.prepare` le déclare par `needsSecondSession` ; c'est
+ * l'exécuteur, seul à détenir le `SshRunner`, qui doit l'exécuter.
+ *
+ * **Ces tests existent parce que le branchement avait été oublié.** Tout était écrit,
+ * testé et éprouvé sur banc — et rien ne l'appelait : `ssh-harden.ts` n'était importé par
+ * aucun module de production, et aucun test ne s'en apercevait.
+ */
+describe("executePlan — le durcissement SSH", () => {
+  const planAvecPreparation = (): Plan =>
+    plan([
+      { type: "host.prepare", swap_mo: 2048 },
+      { type: "proxy.caddy.install" },
+    ])
+
+  it("durcit SSH après l'étape qui le réclame", async () => {
+    const harden = vi.fn(durcissementReussi)
+    const r = await joue(planAvecPreparation(), serveur(() => ok()), false, transfertReussi, harden)
+
+    expect(harden).toHaveBeenCalledTimes(1)
+    expect(harden.mock.calls[0]?.[1]).toEqual(CIBLE)
+    // Le compte visé est l'applicatif, celui que `host.prepare` vient de doter d'une clé.
+    expect(harden.mock.calls[0]?.[2]).toBe("skynode")
+    expect(r.steps.find((s) => s.type === "host.prepare")?.durcissement?.outcome).toBe("applied")
+  })
+
+  /** Aucune autre étape ne l'ouvre : un durcissement de trop couperait des sessions pour rien. */
+  it("ne durcit pas quand aucune étape ne le réclame", async () => {
+    const harden = vi.fn(durcissementReussi)
+    await joue(plan(), serveur(() => ok()), false, transfertReussi, harden)
+
+    expect(harden).not.toHaveBeenCalled()
+  })
+
+  /**
+   * Une machine déjà préparée peut n'avoir jamais été durcie, parce qu'un passage précédent
+   * s'est arrêté à cette étape même. `hardenSsh` est idempotent : le rejouer ferme ce trou.
+   */
+  it("durcit aussi quand l'étape était déjà appliquée", async () => {
+    const harden = vi.fn(durcissementReussi)
+    await joue(
+      planAvecPreparation(),
+      serveur((t) => (t === "inconnu" ? rien() : ok())),
+      false,
+      transfertReussi,
+      harden
+    )
+
+    expect(harden).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * Poursuivre après un durcissement en échec livrerait une application sur un serveur dont
+   * on sait qu'on n'a pas su fermer la porte — la promesse faite au client, précisément.
+   */
+  it("arrête le plan quand le durcissement échoue", async () => {
+    const vus: string[] = []
+    const harden: HardenFn = async () => ({
+      outcome: "failed",
+      detail: "La porte du compte applicatif ne s'est pas ouverte : rien n'a été durci.",
+      diagnostic: "",
+    })
+    const r = await joue(planAvecPreparation(), serveur(() => ok(), vus), false, transfertReussi, harden)
+
+    expect(r.outcome).toBe("failed")
+    expect(vus).not.toContain("proxy.caddy.install")
+    expect(r.steps.find((s) => s.type === "host.prepare")?.durcissement?.outcome).toBe("failed")
+  })
+
+  /**
+   * `host.prepare` est irréversible : un durcissement raté laisse donc une machine préparée,
+   * et le rapport doit le nommer plutôt que de laisser croire à un retour arrière complet.
+   */
+  it("déclare en résidu la préparation qu'un durcissement raté ne défait pas", async () => {
+    const harden: HardenFn = async () => ({ outcome: "failed", detail: "refusé", diagnostic: "" })
+    const r = await joue(planAvecPreparation(), serveur(() => ok()), false, transfertReussi, harden)
+
+    expect(r.steps.find((s) => s.type === "host.prepare")?.undone).toBe("impossible")
+    expect(r.residue.join(" ")).toMatch(/préparer la machine/)
+  })
+
+  /** En simulation, rien ne s'ouvre — le durcissement pas davantage que les étapes. */
+  it("ne durcit rien en simulation", async () => {
+    const harden = vi.fn(durcissementReussi)
+    await joue(planAvecPreparation(), serveur(() => ok()), true, transfertReussi, harden)
+
+    expect(harden).not.toHaveBeenCalled()
   })
 })

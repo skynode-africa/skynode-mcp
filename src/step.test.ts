@@ -32,7 +32,10 @@ const ETAPES: { [T in PlanStep["type"]]: Extract<PlanStep, { type: T }> } = {
     sortie: "server",
     port: 3000,
   },
-  "build.image": { type: "build.image", source: { type: "local", path: "." }, tag: "boutique:latest" },
+  // `TAG_PATTERN` (`plan-validate.ts`) n'accepte que « skynode/… » : « boutique:latest »
+  // était une valeur que le validateur aurait refusée, dans un jeu qui se dit pourtant
+  // calqué sur ce qu'accepte `plan-types.ts`.
+  "build.image": { type: "build.image", source: { type: "local", path: "." }, tag: "skynode/boutique" },
   "env.write": { type: "env.write", depuis: ".env.production" },
   "app.run": { type: "app.run", port_interne: 3000, reseau: "skynode" },
   "proxy.caddy.site": { type: "proxy.caddy.site", domaine: "boutique.exemple.ci" },

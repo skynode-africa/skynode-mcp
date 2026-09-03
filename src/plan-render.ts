@@ -1,4 +1,6 @@
+import type { Instance } from "./api.js"
 import type { Plan, PlanStep } from "./plan-types.js"
+import { isReversible } from "./step.js"
 import type { Violation } from "./plan-validate.js"
 
 /**
@@ -38,7 +40,12 @@ export function renderStep(step: PlanStep): string {
       )
 
     case "build.image":
-      return `construire l'image ${step.tag} depuis ${step.source.path}`
+      // « depuis . » ne dit rien à un humain. Et le produit ne sait construire que depuis la
+      // racine — `exigeSourceLocale` refuse tout autre chemin —, donc c'est cela qu'il faut
+      // écrire : le texte approuvé doit décrire le geste, pas le champ.
+      return step.source.path === "."
+        ? `construire l'image ${step.tag} depuis la racine du projet`
+        : `construire l'image ${step.tag} depuis ${step.source.path}`
 
     case "env.write":
       // Le nom du fichier suffit à décider ; sa valeur ferait transiter les secrets du
@@ -59,7 +66,11 @@ export function renderStep(step: PlanStep): string {
 /** Un plan complet ne dépasse pas ce seuil ; borne les listes plutôt que d'y couper à l'aveugle. */
 const MAX_HORS_PERIMETRE = 20
 
-export function formatPlan(plan: Plan): string {
+/**
+ * `instance` est facultative : sans elle, le serveur se nomme par son identifiant, qui est
+ * la vérité mais pas grand-chose pour un humain. `plan_deployment` la tient sous la main.
+ */
+export function formatPlan(plan: Plan, instance?: Instance): string {
   const lines: string[] = [plan.resume, ""]
 
   lines.push("Étapes :")
@@ -67,7 +78,16 @@ export function formatPlan(plan: Plan): string {
     lines.push(`${index + 1}. ${renderStep(step)}`)
   })
 
-  lines.push("", `Application : ${plan.application}`)
+  // **Le serveur, nommé.** Un plan qu'on approuve sans savoir sur quelle machine il
+  // s'appliquera n'est pas approuvé : deux VPS neufs de la même image ont la même empreinte
+  // d'état, et rien dans le texte ne les distinguait.
+  lines.push(
+    "",
+    instance === undefined
+      ? `Serveur : ${plan.serveur}`
+      : `Serveur : ${instance.hostname} — ${instance.ipv4} (${plan.serveur})`
+  )
+  lines.push(`Application : ${plan.application}`)
 
   const domaine = plan.etapes.find(
     (step): step is Extract<PlanStep, { type: "proxy.caddy.site" }> => step.type === "proxy.caddy.site"
@@ -76,7 +96,19 @@ export function formatPlan(plan: Plan): string {
     lines.push(`Domaine : ${domaine.domaine}`)
   }
 
-  lines.push(plan.reversible ? "Ce plan est réversible." : "Ce plan est irréversible : il ne pourra pas être annulé.")
+  // « Irréversible » tout court n'aide personne à décider : ce qui compte est **quoi** ne
+  // se défera pas. Un développeur qui lit « installer Docker ne se désinstalle pas » sait
+  // ce qu'il risque ; « ce plan est irréversible » le laisse imaginer le pire.
+  const definitives = plan.etapes.filter((etape) => !isReversible(etape))
+  if (definitives.length === 0) {
+    lines.push("Ce plan est réversible : une étape qui échoue fait défaire les précédentes.")
+  } else {
+    lines.push(
+      "Ce plan n'est pas entièrement réversible. Ce qui restera sur la machine même si une " +
+        "étape échoue plus loin :",
+      ...definitives.map((etape) => `- ${renderStep(etape)}`)
+    )
+  }
 
   if (plan.hors_perimetre.length > 0) {
     const shown = plan.hors_perimetre.slice(0, MAX_HORS_PERIMETRE)

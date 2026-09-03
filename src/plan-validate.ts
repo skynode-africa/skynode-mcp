@@ -8,6 +8,7 @@ import {
 } from "./plan-rules.js"
 import type { ServerFacts } from "./probe.js"
 import { classify, type Classification } from "./regime.js"
+import { isReversible } from "./step.js"
 
 /**
  * Le périmètre de sécurité du produit (spec §6.1) : « Cette liste est le périmètre de
@@ -181,6 +182,8 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
   let caddyAvailable = caddyAlreadyPresent(facts)
   let buildImageSeen = false
   let appRunSeen = false
+  /** Le port que le Dockerfile engendré impose, quand le plan en engendre un. */
+  let portDockerfile: number | null = null
   const lastIndex = rawEtapes.length - 1
 
   rawEtapes.forEach((raw, index) => {
@@ -258,6 +261,11 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
       }
 
       case "build.generate_dockerfile":
+        // Retenu pour être confronté au port d'`app.run` plus bas : le gabarit fixe
+        // `ENV PORT` et `EXPOSE` dessus, et c'est l'étiquette d'`app.run` qui dit au proxy
+        // où frapper. Le `typeof` n'est pas superflu — rien ne garantit ici qu'une étape a
+        // traversé `parsePlan`, seulement que son type TypeScript le prétend.
+        if (typeof etape.port === "number") portDockerfile = etape.port
         break
 
       case "build.image": {
@@ -345,6 +353,23 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
       }
 
       case "app.run": {
+        // Le Dockerfile engendré fixe `ENV PORT` et `EXPOSE` sur **son** port ; `app.run`
+        // étiquette le conteneur avec le sien, et c'est cette étiquette que
+        // `proxy.caddy.site` relit pour router. Désaccordés, Caddy frappe une porte que
+        // l'application n'ouvre pas : un 502 que ni le plan ni le rapport n'expliquent.
+        // Le composeur tire les deux de la même valeur, mais un plan peut être modifié et
+        // resoumis entre la composition et l'exécution (spec §5.1).
+        if (portDockerfile !== null && etape.port_interne !== portDockerfile) {
+          violations.push({
+            regle: "contradiction",
+            etape: index,
+            message:
+              `étape ${index} (app.run) : le conteneur est étiqueté sur le port ${String(etape.port_interne)} ` +
+              `alors que le Dockerfile engendré fait écouter l'application sur ${String(portDockerfile)}. ` +
+              "Le proxy routerait vers un port fermé.",
+          })
+        }
+
         if (!buildImageSeen) {
           violations.push({
             regle: "dependances",
@@ -457,6 +482,22 @@ export function validatePlan(plan: Plan, facts: ServerFacts, classification: Cla
         })
     }
   })
+
+  // Le champ `reversible` est **déclaré** par le plan, et `formatPlan` ne s'y fie plus : il
+  // déduit des étapes ce qui ne se défera pas. Mais le champ subsiste au schéma, et un plan
+  // qui l'affirme contre ses propres étapes ment à quiconque le relit — un outil, un
+  // journal, une version future de ce code. On refuse plutôt que de laisser cohabiter deux
+  // vérités.
+  const reversibleReel = plan.etapes.every((etape) => isReversible(etape))
+  if (plan.reversible !== reversibleReel) {
+    violations.push({
+      regle: "contradiction",
+      message: reversibleReel
+        ? "Le plan se déclare irréversible alors que chacune de ses étapes sait se défaire."
+        : "Le plan se déclare réversible alors qu'il porte des étapes qui ne se défont pas : " +
+          "l'installation de paquets et la préparation de la machine sont définitives.",
+    })
+  }
 
   return violations.length === 0 ? { ok: true } : { ok: false, violations }
 }

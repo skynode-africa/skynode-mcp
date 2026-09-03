@@ -109,6 +109,36 @@ describe("formatExecReport", () => {
     expect(formatExecReport(rapport())).toMatch(/host\.install_docker/)
   })
 
+  /**
+   * Le durcissement SSH n'est pas le fait du script de l'étape : il ouvre ses propres
+   * sessions, et son échec est le seul du produit qui serait irréparable à distance s'il
+   * tournait mal. Le confondre avec le reste du compte rendu le rendrait invisible.
+   */
+  it("rend le durcissement SSH sur sa propre ligne", () => {
+    const t = formatExecReport(
+      rapport({
+        outcome: "failed",
+        steps: [
+          {
+            index: 0,
+            type: "host.install_docker",
+            outcome: "applied",
+            detail: "machine préparée",
+            durcissement: { outcome: "failed", detail: "la porte du compte applicatif ne s'ouvre pas" },
+          },
+        ],
+      })
+    )
+
+    expect(t).toMatch(/\[SSH ÉCHEC\] la porte du compte applicatif ne s'ouvre pas/)
+    expect(t).toContain("machine préparée")
+  })
+
+  /** Une étape sans durcissement n'en fait pas mention : la ligne dirait quelque chose de faux. */
+  it("ne mentionne pas le durcissement quand il n'y en a pas eu", () => {
+    expect(formatExecReport(rapport())).not.toMatch(/\[SSH/)
+  })
+
   it("ne rend jamais de diagnostic brut de plusieurs milliers de lignes", () => {
     const enorme = rapport({
       outcome: "failed",

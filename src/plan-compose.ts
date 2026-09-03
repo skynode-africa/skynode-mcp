@@ -9,6 +9,7 @@ import type { ProjectFacts } from "./project-analyze.js"
 import type { ServerFacts } from "./probe.js"
 import type { Classification } from "./regime.js"
 import { BLOCAGE_DOCKER_INJOIGNABLE } from "./regime.js"
+import { isReversible } from "./step.js"
 
 /**
  * Composition d'un plan de déploiement à partir des deux constats du jalon 2.
@@ -303,7 +304,13 @@ export function composePlan(
       ),
       etapes,
       hors_perimetre: horsPerimetre,
-      reversible: true,
+      // **Déduit, jamais affirmé.** `plan-render.ts` écrit « Ce plan est réversible » d'après
+      // ce booléen, et c'est sur cette phrase que le développeur décide s'il ose. La valeur
+      // était écrite en dur à `true` : tout plan portant `host.prepare` ou
+      // `host.install_docker` — irréversibles, et `step.ts` le déclare — l'annonçait donc
+      // réversible. La source de vérité est `isReversible`, celle-là même que l'exécuteur
+      // consulte pour décider de ce qu'il sait défaire.
+      reversible: etapes.every((etape) => isReversible(etape)),
     },
   }
 }

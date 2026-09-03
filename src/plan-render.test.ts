@@ -108,8 +108,40 @@ describe("formatPlan", () => {
     expect(formatPlan(plan()).length).toBeLessThan(2000)
   })
 
-  it("dit qu'un plan irréversible l'est", () => {
-    expect(formatPlan(plan({ reversible: false }))).toMatch(/irréversible|ne pourra pas être annulé/i)
+  /**
+   * Le rendu ne se fie plus au champ `reversible` du plan mais aux étapes elles-mêmes : le
+   * champ était écrit en dur à `true` par le composeur, et tout plan portant `host.prepare`
+   * s'annonçait donc réversible à celui qui l'approuvait.
+   */
+  it("nomme ce qui ne se défera pas, plutôt que de dire « irréversible »", () => {
+    const rendu = formatPlan(
+      plan({
+        etapes: [
+          { type: "host.install_docker" },
+          { type: "proxy.caddy.install" },
+        ],
+        reversible: false,
+      })
+    )
+
+    expect(rendu).toMatch(/n'est pas entièrement réversible/)
+    expect(rendu).toMatch(/- installer Docker/)
+    // Caddy se défait : il n'a rien à faire dans cette liste.
+    expect(rendu).not.toMatch(/- installer Caddy/)
+  })
+
+  it("annonce réversible un plan dont chaque étape sait se défaire", () => {
+    const rendu = formatPlan(plan({ etapes: [{ type: "proxy.caddy.install" }], reversible: true }))
+
+    expect(rendu).toMatch(/Ce plan est réversible/)
+    expect(rendu).not.toMatch(/n'est pas entièrement réversible/)
+  })
+
+  /** Le champ du plan ne peut plus contredire les étapes : le rendu suit les étapes. */
+  it("ignore un champ reversible qui contredit les étapes", () => {
+    const rendu = formatPlan(plan({ etapes: [{ type: "host.install_docker" }], reversible: true }))
+
+    expect(rendu).toMatch(/n'est pas entièrement réversible/)
   })
 })
 
