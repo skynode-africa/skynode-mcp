@@ -115,6 +115,49 @@ async function withClient<T>(
 }
 
 describe("registerTools", () => {
+  /**
+   * Sans `readOnlyHint`, le protocole MCP suppose le contraire : un client prudent demande
+   * alors une approbation pour `list_servers`, et l'approbation cesse d'être le signal
+   * qu'elle doit rester — celui qui distingue les deux outils qui écrivent des six qui ne
+   * font que lire.
+   */
+  it("déclare au client MCP lesquels de ses outils écrivent", async () => {
+    await withClient({}, fakeSsh(), async (client) => {
+      const { tools } = await client.listTools()
+      const lecture = new Set([
+        "list_servers",
+        "server_status",
+        "inspect_project",
+        "inspect_server",
+        "plan_deployment",
+        "app_logs",
+      ])
+
+      for (const outil of tools) {
+        if (lecture.has(outil.name)) {
+          expect(outil.annotations?.readOnlyHint, outil.name).toBe(true)
+          expect(outil.annotations?.destructiveHint, outil.name).toBeUndefined()
+        } else {
+          expect(outil.annotations?.readOnlyHint, outil.name).toBe(false)
+          expect(outil.annotations?.destructiveHint, outil.name).toBe(true)
+        }
+      }
+
+      expect(tools).toHaveLength(8)
+    })
+  })
+
+  /** Seul `inspect_project` ne sort pas de la machine : ni API, ni session SSH. */
+  it("distingue l'outil qui ne quitte pas la machine", async () => {
+    await withClient({}, fakeSsh(), async (client) => {
+      const { tools } = await client.listTools()
+
+      for (const outil of tools) {
+        expect(outil.annotations?.openWorldHint, outil.name).toBe(outil.name !== "inspect_project")
+      }
+    })
+  })
+
   it("enregistre les huit outils", () => {
     const tools = mount({})
 
@@ -363,13 +406,77 @@ describe("registerTools", () => {
         "env_file",
         "project_path",
         "server_id",
+        "ssh_user",
       ])
       expect([...(outil!.inputSchema.required ?? [])].sort()).toEqual([
         "application",
         "project_path",
         "server_id",
       ])
+      // `ssh_user` est un nom de compte POSIX, que `resolveSshTarget` borne par
+      // `USER_PATTERN` avant qu'il devienne l'argument de `ssh -l`. Ce que ce test interdit,
+      // c'est tout ce par quoi un agent désignerait lui-même la machine ou la commande.
+      expect(Object.keys(outil!.inputSchema.properties ?? {})).not.toContain("host")
+      expect(Object.keys(outil!.inputSchema.properties ?? {})).not.toContain("command")
+      expect(Object.keys(outil!.inputSchema.properties ?? {})).not.toContain("port")
     })
+  })
+
+  /** Le constat distant s'ouvre sous le compte demandé, quand il en est demandé un. */
+  it("constate un serveur sous le compte SSH demandé", async () => {
+    const cibles: unknown[] = []
+    const ssh: SshRunner = {
+      run: async (cible): Promise<SshResult> => {
+        cibles.push(cible)
+        return { code: 0, stdout: PROBE_OK, stderr: "" }
+      },
+    }
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, ssh)
+
+    await tools.get("inspect_server")!({ server_id: instance.id, ssh_user: "deploie" } as never)
+
+    expect(cibles[0]).toEqual({ host: instance.ipv4, user: "deploie" })
+  })
+
+  /** Sans compte demandé, celui que l'API déclare fait foi. */
+  it("retombe sur le compte déclaré par l'API", async () => {
+    const cibles: unknown[] = []
+    const ssh: SshRunner = {
+      run: async (cible): Promise<SshResult> => {
+        cibles.push(cible)
+        return { code: 0, stdout: PROBE_OK, stderr: "" }
+      },
+    }
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, ssh)
+
+    await tools.get("inspect_server")!({ server_id: instance.id } as never)
+
+    expect(cibles[0]).toEqual({ host: instance.ipv4, user: instance.defaultUser })
+  })
+
+  /**
+   * Le constat qui compose le plan doit s'ouvrir sous le compte demandé : c'est celui-là
+   * qu'`apply_plan` réutilisera, et un plan composé sous un autre décrirait une machine vue
+   * par des yeux différents — élévation possible ici, refusée là.
+   */
+  it("constate sous le compte SSH demandé", async () => {
+    const cibles: unknown[] = []
+    const ssh: SshRunner = {
+      run: async (cible): Promise<SshResult> => {
+        cibles.push(cible)
+        return { code: 0, stdout: PROBE_OK, stderr: "" }
+      },
+    }
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, ssh)
+
+    await tools.get("plan_deployment")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      application: "boutique",
+      ssh_user: "deploie",
+    } as never)
+
+    expect(cibles[0]).toEqual({ host: instance.ipv4, user: "deploie" })
   })
 
   /**
@@ -460,13 +567,60 @@ describe("apply_plan", () => {
       const { tools } = await client.listTools()
       const outil = tools.find((t) => t.name === "apply_plan")
 
-      expect(Object.keys(outil?.inputSchema.properties ?? {}).sort()).toEqual([
-        "dry_run",
-        "plan",
-        "project_path",
-        "server_id",
-      ])
+      const champs = Object.keys(outil?.inputSchema.properties ?? {})
+
+      expect(champs.sort()).toEqual(["dry_run", "plan", "project_path", "server_id", "ssh_user"])
+
+      // Le seul outil qui écrit en root : aucun champ ne doit lui désigner une machine, une
+      // commande, un port ni un chemin distant. `ssh_user` est un nom de compte, borné par
+      // `USER_PATTERN` avant de devenir l'argument de `ssh -l`.
+      for (const interdit of ["host", "hostname", "ip", "command", "cmd", "script", "port", "remote_path"]) {
+        expect(champs).not.toContain(interdit)
+      }
     })
+  })
+
+  /**
+   * Le compte de la session doit être **le même** qu'au constat : c'est lui qui a établi que
+   * l'élévation fonctionne. Déployer sous un autre ferait échouer chaque étape sur un `sudo`
+   * refusé, sans que rien ne pointe la cause.
+   */
+  it("ouvre la session sous le compte demandé", async () => {
+    const cibles: unknown[] = []
+    const ssh: SshRunner = {
+      run: async (cible, script: string): Promise<SshResult> => {
+        cibles.push(cible)
+        if (script.includes("probe.end")) return { code: 0, stdout: PROBE_OK, stderr: "" }
+        return { code: 0, stdout: "step.outcome\tapplied\nstep.detail\tx\nstep.end\t1\n", stderr: "" }
+      },
+    }
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, ssh)
+
+    await tools.get("apply_plan")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      plan: await planValide(),
+      ssh_user: "deploie",
+      dry_run: true,
+    } as never)
+
+    expect(cibles[0]).toEqual({ host: instance.ipv4, user: "deploie" })
+  })
+
+  /** Un compte hostile n'ouvre aucune session : il deviendrait l'argument de `ssh -l`. */
+  it("refuse un compte SSH hors motif sans ouvrir de session", async () => {
+    const run = vi.fn()
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, { run })
+
+    const out = (await tools.get("apply_plan")!({
+      server_id: instance.id,
+      project_path: FIXTURE_NEXT,
+      plan: await planValide(),
+      ssh_user: "-oProxyCommand=touch /tmp/x",
+    } as never)) as { isError?: boolean }
+
+    expect(run).not.toHaveBeenCalled()
+    expect(out.isError).toBe(true)
   })
 
   /**

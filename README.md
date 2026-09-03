@@ -6,9 +6,9 @@ sur vos serveurs [SkyNode](https://skynode.africa).
 Il constate vos projets et vos serveurs, propose un plan de déploiement en français, et
 l'applique quand vous l'avez approuvé. Il ne peut ni commander ni payer.
 
-**Cinq de ses huit outils sont en lecture seule.** Les trois autres — `apply_plan`,
-`rollback` — écrivent sur votre serveur, et votre client MCP vous le demande avant. Ce
-qu'ils font exactement est décrit plus bas, sans détour.
+**Six de ses huit outils sont en lecture seule**, et le déclarent à votre client MCP. Les
+deux autres — `apply_plan` et `rollback` — écrivent sur votre serveur, et votre client vous
+le demande avant. Ce qu'ils font exactement est décrit plus bas, sans détour.
 
 ## Installation
 
@@ -151,6 +151,9 @@ s'appliquent aux deux.
 
 - Le client `ssh` du système est requis. **Sous Windows, passez par WSL** — le paquet
   suppose la présence de `ssh` et de `tar`.
+- **Le compte SSH est celui que l'API déclare**, sauf si vous en indiquez un autre par
+  `ssh_user` — disponible sur `inspect_server`, `plan_deployment` et `apply_plan`. Le même
+  compte doit servir aux trois : c'est celui dont le constat a établi qu'il peut s'élever.
 - **La clé doit déjà être autorisée sur le serveur.** SkyNode n'en détient aucune et
   n'en installe aucune : c'est le corollaire direct de la promesse « ce que SkyNode ne
   voit pas » ci-dessous.
