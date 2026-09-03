@@ -153,7 +153,9 @@ describe("build.image", () => {
   it("borne le condensat avant de l'interpoler", () => {
     const s = scriptImage()
 
-    expect(s).toContain('""|*[!0-9a-f]*)')
+    // Le bloc entier, pas seulement le motif : une branche laissée orpheline par un « case »
+    // disparu passerait un contrôle qui ne cherche qu'une ligne, et ne bornerait plus rien.
+    expect(s).toMatch(/case "\$sha" in\n[^\n]*""\|\*\[!0-9a-f\]\*\)[^\n]*\nesac/)
     expect(s).toContain(`[ "\${#sha}" -ne ${LONGUEUR_CONDENSAT} ]`)
   })
 

@@ -263,6 +263,15 @@ describe("le script de réception", () => {
     expect(c.remoteScript).toContain("transfer.end")
   })
 
+  /**
+   * `bsdtar` détecte la compression tout seul et pardonnerait un désaccord entre les deux
+   * côtés ; le `tar` GNU du serveur, non. Le défaut ne se verrait donc qu'en production.
+   */
+  it("comprime et décomprime avec la même option", () => {
+    expect(c.args).toContain("--gzip")
+    expect(c.remoteScript).toContain("--gzip")
+  })
+
   it("met le chemin en sécurité au lieu de le coller nu", () => {
     expect(c.remoteScript).not.toMatch(/rm -rf -- \/opt/)
   })

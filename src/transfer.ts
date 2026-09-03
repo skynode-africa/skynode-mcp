@@ -126,6 +126,18 @@ const SEGMENT_EXIGE_TRAVAIL = "skynode"
 /** Assez pour diagnostiquer, pas assez pour noyer le contexte de l'agent — comme `remote.ts`. */
 const MAX_DIAGNOSTIC = 1000
 
+/**
+ * La compression, **et la même des deux côtés**.
+ *
+ * La liaison visée est celle d'un client ivoirien, pas un réseau de centre de données : la
+ * compression coûte quelques cycles et épargne l'essentiel du temps de transfert. Mais le
+ * `tar` qui comprime et celui qui extrait doivent s'accorder : `bsdtar` — celui de macOS,
+ * donc celui d'une bonne part des machines de développement — détecte la compression tout
+ * seul et pardonnerait un désaccord, là où le `tar` GNU du serveur refuserait un flux non
+ * comprimé qu'on lui annonce comprimé. Une constante partagée, et un test qui exige les deux.
+ */
+const COMPRESSION = "--gzip"
+
 /** Un projet peut peser lourd sur une liaison lente ; l'attente par défaut en tient compte. */
 const DELAI_TRANSFERT_MS = 300_000
 
@@ -307,7 +319,7 @@ function scriptReception(workDir: string): string {
     "umask 022",
     `rm -rf -- ${q(workDir)}`,
     `mkdir -p -- ${q(workDir)}`,
-    `tar --extract --gzip --file - --no-same-owner --directory ${q(workDir)}`,
+    `tar --extract ${COMPRESSION} --file - --no-same-owner --directory ${q(workDir)}`,
     `printf 'transfer.fichiers\\t%s\\n' "$(find ${q(workDir)} -type f | wc -l | tr -d ' ')"`,
     "printf 'transfer.end\\t1\\n'",
   ].join("\n")
@@ -336,9 +348,7 @@ export function buildTransferCommand(
     command: "tar",
     args: Object.freeze([
       "--create",
-      // La liaison visée est celle d'un client ivoirien, pas un réseau de centre de données :
-      // la compression coûte quelques cycles et épargne l'essentiel du temps de transfert.
-      "--gzip",
+      COMPRESSION,
       "--file",
       "-",
       "--directory",
