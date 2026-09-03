@@ -282,8 +282,12 @@ describe("app.run", () => {
     const s = scriptRun()
 
     expect(s).toMatch(
-      /if \[ "\$courante" = "\$image" \] && \[ "\$marche" = true \] && \[ "\$porte" = '3000' \]; then\n\s*fin unchanged/
+      /if \[ "\$courante" = "\$image" \] && \[ "\$marche" = running \] && \[ "\$porte" = '3000' \]; then\n\s*fin unchanged/
     )
+    // `.State.Status`, jamais `.State.Running` : mesuré au banc, un conteneur en boucle de
+    // redémarrage rend `Running=true`, et l'étape le prendrait pour sain.
+    expect(s).toContain("marche=$(docker inspect -f '{{.State.Status}}' boutique")
+    expect(s).not.toContain("{{.State.Running}}")
   })
 
   /**
@@ -295,8 +299,17 @@ describe("app.run", () => {
     const s = scriptRun()
 
     expect(s).toContain(`sleep ${ATTENTE_DEMARRAGE_S}`)
-    expect(s).toContain("docker inspect -f '{{.State.Running}}' boutique")
     expect(s).toContain(`docker logs --tail ${LIGNES_JOURNAL_APP} boutique`)
+
+    // La garde porte sur `.State.Status` **et** sur `RestartCount`, jamais sur
+    // `.State.Running` : un conteneur qui meurt à chaque démarrage sous
+    // « --restart unless-stopped » rend Running=true, Status=restarting, ExitCode=1. La
+    // garde écrite sur Running laissait donc passer exactement ce qu'elle devait arrêter,
+    // et proxy.caddy.site publiait un domaine devant un conteneur qui ne sert rien.
+    expect(s).toContain("statut=$(docker inspect -f '{{.State.Status}}' boutique")
+    expect(s).toContain("redemarrages=$(docker inspect -f '{{.RestartCount}}' boutique")
+    expect(s).toContain('if [ "$statut" != running ] || [ "$redemarrages" != 0 ]; then')
+    expect(s).not.toContain("{{.State.Running}}")
     // Un conteneur mort sous le bon nom empêcherait tout rejeu : le nom resterait pris.
     expect(s).toMatch(/docker logs[\s\S]*docker rm -f boutique[\s\S]*echec/)
   })

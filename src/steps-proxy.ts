@@ -256,7 +256,10 @@ const SCRIPT_INSTALL: string = [
   // sert peut-être déjà les autres applications de la machine, et le recréer couperait leur
   // trafic le temps du redémarrage — pour un résultat identique, puisque l'image est
   // épinglée et la configuration lue dans un montage lié.
-  `if docker inspect -f '{{.State.Running}}' ${CADDY_CONTAINER} 2>/dev/null | grep -qx true; then`,
+  // `.State.Status`, jamais `.State.Running` : un conteneur en boucle de redémarrage rend
+  // `Running=true` (mesuré au banc de la tâche 8). Un Caddy qui meurt en boucle serait alors
+  // « laissé intact » et l'étape rendrait `unchanged` sur un proxy hors service.
+  `if docker inspect -f '{{.State.Status}}' ${CADDY_CONTAINER} 2>/dev/null | grep -qx running; then`,
   '  if [ "$applique" = oui ]; then',
   '    fin applied "$detail"',
   "  fi",
@@ -297,7 +300,15 @@ const SCRIPT_INSTALL: string = [
   // la seconde, et `docker run -d` a pourtant rendu 0. Sans ce constat, l'étape rendrait
   // `applied` sur un proxy éteint.
   "sleep 2",
-  `if ! docker inspect -f '{{.State.Running}}' ${CADDY_CONTAINER} 2>/dev/null | grep -qx true; then`,
+  // **Jamais `.State.Running`.** Mesuré au banc de la tâche 8 : sous `--restart
+  // unless-stopped`, un conteneur qui meurt à chaque démarrage rend `Running=true` avec un
+  // état `restarting` et un code de sortie 1. La garde écrite sur `Running` laissait donc
+  // passer exactement ce qu'elle devait arrêter. `RestartCount` ferme le reste : deux
+  // secondes après `docker run`, un seul redémarrage veut déjà dire que le processus est
+  // mort une fois.
+  `statut=$(docker inspect -f '{{.State.Status}}' ${CADDY_CONTAINER} 2>/dev/null)`,
+  `redemarrages=$(docker inspect -f '{{.RestartCount}}' ${CADDY_CONTAINER} 2>/dev/null)`,
+  'if [ "$statut" != running ] || [ "$redemarrages" != 0 ]; then',
   // Le journal explique le refus ; il part sur stderr, que `runRemote` joint au diagnostic.
   `  docker logs --tail 40 ${CADDY_CONTAINER} >&2 2>&1 || true`,
   // L'invariant n°4 : une étape qui échoue en cours de route défait ce qu'elle a commencé.
@@ -426,7 +437,10 @@ function scriptSite(domaine: string, application: string): string {
 
     // Sans proxy en marche, il n'y a rien à recharger — et écrire un fichier de site que
     // personne ne lit ferait rendre `applied` à une étape qui n'a rien publié.
-    `if ! docker inspect -f '{{.State.Running}}' ${CADDY_CONTAINER} 2>/dev/null | grep -qx true; then`,
+    // `.State.Status`, jamais `.State.Running` : un conteneur en boucle de redémarrage rend
+    // `Running=true` (mesuré au banc de la tâche 8), et l'étape publierait un site derrière un
+    // proxy qui ne tient pas debout.
+    `if ! docker inspect -f '{{.State.Status}}' ${CADDY_CONTAINER} 2>/dev/null | grep -qx running; then`,
     "  echec " +
       q(`Le conteneur ${CADDY_CONTAINER} ne tourne pas : il n'y a aucun proxy à configurer.`),
     "fi",
@@ -574,7 +588,7 @@ function scriptSiteUndo(domaine: string, application: string): string {
     // fichiers de site, et le retirer couperait le routage des autres applications de la
     // machine. Un motif qui ne correspond à aucun fichier n'est qu'un avertissement pour
     // Caddy, donc le laisser ne coûte rien même quand ce site était le dernier.
-    `if docker inspect -f '{{.State.Running}}' ${CADDY_CONTAINER} 2>/dev/null | grep -qx true; then`,
+    `if docker inspect -f '{{.State.Status}}' ${CADDY_CONTAINER} 2>/dev/null | grep -qx running; then`,
     `  docker exec ${CADDY_CONTAINER} caddy reload --config ${CHEMIN_CADDYFILE} --adapter caddyfile >&2 || echec ` +
       q("Le fichier de site a été supprimé mais Caddy n'a pas pu être rechargé : il sert encore l'ancienne configuration."),
     "fi",

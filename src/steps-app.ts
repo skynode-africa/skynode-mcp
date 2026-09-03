@@ -393,9 +393,11 @@ function scriptAppRun(step: Extract<PlanStep, { type: "app.run" }>, ctx: StepCon
     // `proxy.caddy.site` router ait ailleurs que ce que le plan annonce).
     'if [ "$notre" = oui ]; then',
     `  courante=$(docker inspect -f '{{.Config.Image}}' ${application} 2>/dev/null)`,
-    `  marche=$(docker inspect -f '{{.State.Running}}' ${application} 2>/dev/null)`,
+    // `.State.Status`, pas `.State.Running`, pour la raison expliquée plus bas : un conteneur
+    // en boucle de redémarrage rend `Running=true`, et l'étape le prendrait pour sain.
+    `  marche=$(docker inspect -f '{{.State.Status}}' ${application} 2>/dev/null)`,
     `  porte=$(docker inspect -f '{{index .Config.Labels "${ETIQUETTE_PORT}"}}' ${application} 2>/dev/null)`,
-    `  if [ "$courante" = "$image" ] && [ "$marche" = true ] && [ "$porte" = ${q(port)} ]; then`,
+    `  if [ "$courante" = "$image" ] && [ "$marche" = running ] && [ "$porte" = ${q(port)} ]; then`,
     "    fin unchanged " +
       q(`Le conteneur « ${application} » tourne déjà sur cette image et ce port interne : rien à redémarrer.`),
     "  fi",
@@ -438,14 +440,25 @@ function scriptAppRun(step: Extract<PlanStep, { type: "app.run" }>, ctx: StepCon
 
     // Un `docker run -d` réussi ne dit rien de la suite : le processus peut sortir aussitôt.
     `sleep ${String(ATTENTE_DEMARRAGE_S)}`,
-    `if ! docker inspect -f '{{.State.Running}}' ${application} 2>/dev/null | grep -qx true; then`,
+
+    // **Jamais `.State.Running`.** Mesuré sur le banc : un conteneur qui meurt à chaque
+    // démarrage sous `--restart unless-stopped` rend `Running=true` alors que son état est
+    // `restarting` et son code de sortie 1. La garde de vivacité passait donc, l'étape
+    // annonçait « démarré », et c'est `proxy.caddy.site` qui publiait un domaine devant un
+    // conteneur qui ne sert rien. `.State.Status` distingue les deux, et `RestartCount` ferme
+    // le reste : dans les premières secondes, un seul redémarrage veut déjà dire que le
+    // processus est mort une fois.
+    `statut=$(docker inspect -f '{{.State.Status}}' ${application} 2>/dev/null)`,
+    `redemarrages=$(docker inspect -f '{{.RestartCount}}' ${application} 2>/dev/null)`,
+    'if [ "$statut" != running ] || [ "$redemarrages" != 0 ]; then',
     `  docker logs --tail ${String(LIGNES_JOURNAL_APP)} ${application} >&2 2>&1 || true`,
     `  docker rm -f ${application} >&2 2>&1 || true`,
     "  echec " +
       q(
-        `Le conteneur « ${application} » s'est arrêté dans les ${ATTENTE_DEMARRAGE_S} secondes qui ont suivi ` +
-          `son démarrage. Les ${LIGNES_JOURNAL_APP} dernières lignes de son journal sont jointes au ` +
-          "diagnostic ; il a été retiré pour ne pas laisser un conteneur mort sous ce nom."
+        `Le conteneur « ${application} » n'a pas tenu les ${ATTENTE_DEMARRAGE_S} secondes qui ont suivi son ` +
+          "démarrage : il s'est arrêté, ou il redémarre en boucle. Les " +
+          `${LIGNES_JOURNAL_APP} dernières lignes de son journal sont jointes au diagnostic ; il a été ` +
+          "retiré pour ne pas laisser un conteneur mort sous ce nom."
       ),
     "fi",
 

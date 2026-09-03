@@ -118,7 +118,10 @@ describe("proxy.caddy.install", () => {
 
     expect(s).toContain("fin unchanged")
     expect(s.indexOf("fin unchanged")).toBeLessThan(s.indexOf("docker run -d"))
-    expect(s).toMatch(/docker inspect -f '\{\{\.State\.Running\}\}' skynode-caddy .*grep -qx true; then/)
+    expect(s).toMatch(/docker inspect -f '\{\{\.State\.Status\}\}' skynode-caddy .*grep -qx running; then/)
+    // `.State.Running` vaut `true` pour un conteneur en boucle de redémarrage : l'étape
+    // laisserait « intact » un proxy hors service et rendrait `unchanged`.
+    expect(s).not.toContain("{{.State.Running}}")
   })
 
   /** Invariant n°2 : on ne prend jamais un port tenu par quelqu'un d'autre. */
@@ -142,7 +145,9 @@ describe("proxy.caddy.install", () => {
     const s = scriptInstall()
     const apresRun = s.slice(s.indexOf("docker run -d"))
 
-    expect(apresRun).toMatch(/docker inspect -f '\{\{\.State\.Running\}\}' skynode-caddy/)
+    expect(apresRun).toContain("statut=$(docker inspect -f '{{.State.Status}}' skynode-caddy")
+    expect(apresRun).toContain("redemarrages=$(docker inspect -f '{{.RestartCount}}' skynode-caddy")
+    expect(apresRun).toContain('if [ "$statut" != running ] || [ "$redemarrages" != 0 ]; then')
     expect(apresRun).toContain("docker logs")
     expect(apresRun).toMatch(/docker rm -f skynode-caddy/)
     expect(apresRun).toContain("echec ")
