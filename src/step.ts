@@ -1,4 +1,5 @@
 import type { PlanStep, StepType } from "./plan-types.js"
+import { RECETTE_APP_RUN, RECETTE_ENV_WRITE, RECETTE_STATE_RECORD } from "./steps-app.js"
 import { RECETTE_BUILD_GENERATE_DOCKERFILE, RECETTE_BUILD_IMAGE } from "./steps-build.js"
 import { RECETTE_HOST_INSTALL_DOCKER, RECETTE_HOST_PREPARE } from "./steps-host.js"
 import { RECETTE_PROXY_CADDY_INSTALL, RECETTE_PROXY_CADDY_SITE } from "./steps-proxy.js"
@@ -118,10 +119,10 @@ const RECIPES: Record<StepType, StepRecipe> = {
   "proxy.caddy.install": RECETTE_PROXY_CADDY_INSTALL,
   "build.generate_dockerfile": RECETTE_BUILD_GENERATE_DOCKERFILE,
   "build.image": RECETTE_BUILD_IMAGE,
-  "env.write": recetteAEcrire("env.write"),
-  "app.run": recetteAEcrire("app.run"),
+  "env.write": RECETTE_ENV_WRITE,
+  "app.run": RECETTE_APP_RUN,
   "proxy.caddy.site": RECETTE_PROXY_CADDY_SITE,
-  "state.record": recetteAEcrire("state.record"),
+  "state.record": RECETTE_STATE_RECORD,
 }
 
 // `recipeFor` rend l'objet du tableau, pas une copie : sans gel, du code du processus
@@ -167,6 +168,9 @@ export const TYPES_IMPLEMENTES: readonly PlanStep["type"][] = [
   "proxy.caddy.site",
   "build.generate_dockerfile",
   "build.image",
+  "env.write",
+  "app.run",
+  "state.record",
 ]
 
 /**

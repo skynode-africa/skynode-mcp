@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url"
+import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import type { PlanStep } from "./plan-types.js"
@@ -39,9 +41,17 @@ const ETAPES: { [T in PlanStep["type"]]: Extract<PlanStep, { type: T }> } = {
 
 const etapeDe = (type: PlanStep["type"]): PlanStep => ETAPES[type]
 
+/**
+ * Une racine de projet **qui existe vraiment**, et non un chemin inventé : `env.write` lit le
+ * fichier d'environnement sur la machine du développeur au moment où son script se compose
+ * (`steps-app.ts`), et une racine fictive ferait échouer le harnais de conformité pour une
+ * raison qui n'a rien à voir avec la conformité.
+ */
+const RACINE_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "next-sans-dockerfile")
+
 const contexte = (): StepContext => ({
   application: "boutique",
-  projectRoot: "/home/dev/boutique",
+  projectRoot: RACINE_FIXTURE,
   workDir: "/opt/skynode/work/boutique",
 })
 
