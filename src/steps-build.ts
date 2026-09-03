@@ -361,15 +361,41 @@ function scriptImage(application: string, workDir: string): string {
     "applique=oui",
 
     // L'élagage vient **après** la construction, pour que la nouvelle image compte parmi les
-    // conservées. `docker images` rend le dépôt du plus récent au plus ancien ; les trois
-    // premières lignes restent (spec §6.3), c'est ce qui rend `rollback` possible.
+    // conservées. `docker images` rend le dépôt du plus récent au plus ancien, et les
+    // `IMAGES_CONSERVEES` premières restent (spec §6.3) : c'est ce qui rend `rollback`
+    // possible.
+    //
+    // **Mais il compte des images, pas des étiquettes.** Deux passages dont seul le contexte
+    // de construction diffère produisent souvent une image finale identique au bit près —
+    // Docker lui donne alors un seul identifiant sous deux étiquettes, à la même date. Le
+    // classement par date ne les départage plus, et `docker images` retombe sur l'ordre des
+    // étiquettes : mesuré sur le banc, l'étape a désétiqueté l'image qu'elle venait
+    // d'annoncer construite, laissant `app.run` chercher une image qui n'existait plus. On
+    // retient donc les `IMAGES_CONSERVEES` premiers **identifiants distincts**, et l'image de
+    // ce passage n'est jamais candidate.
     //
     // Le découpage en mots est voulu : une étiquette de ce dépôt est
     // `skynode/<application>:<douze caractères hexadécimaux>`, deux formes que
     // `APPLICATION_PATTERN` et le contrôle du condensat bornent — aucune ne porte d'espace.
+    "recents=''",
+    "vus=0",
+    `for identifiant in $(docker images ${q(depot)} --format '{{.ID}}' 2>/dev/null); do`,
+    '  case " $recents " in *" $identifiant "*) continue ;; esac',
+    '  recents="$recents $identifiant"',
+    "  vus=$((vus + 1))",
+    `  if [ "$vus" -ge ${String(IMAGES_CONSERVEES)} ]; then break; fi`,
+    "done",
+
     "elaguees=0",
-    `for vieille in $(docker images ${q(depot)} --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | ` +
-      `grep -v ${q(":<none>$")} | tail -n +${String(IMAGES_CONSERVEES + 1)}); do`,
+    `for couple in $(docker images ${q(depot)} --format '{{.ID}}|{{.Repository}}:{{.Tag}}' 2>/dev/null | ` +
+      `grep -v ${q(":<none>$")}); do`,
+    "  identifiant=${couple%%|*}",
+    "  vieille=${couple#*|}",
+    // L'image de ce passage n'est jamais élaguée, quel que soit l'ordre rendu par Docker :
+    // l'étape vient de l'annoncer construite, et la retirer ici ferait mentir son propre
+    // compte rendu.
+    '  if [ "$vieille" = "$image" ]; then continue; fi',
+    '  case " $recents " in *" $identifiant "*) continue ;; esac',
     // Un `docker rmi` refusé est presque toujours une image que sert un conteneur en marche :
     // Docker se protège lui-même, et l'échec n'en est pas un pour cette étape. On ne fait pas
     // échouer un déploiement réussi pour du ménage.

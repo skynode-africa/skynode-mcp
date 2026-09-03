@@ -171,8 +171,56 @@ describe("build.image", () => {
   it("conserve les trois dernières images et élague le reste", () => {
     const s = scriptImage()
 
-    expect(s).toMatch(/tail -n \+4|head -n -3/)
+    // Le compte porte sur les identifiants distincts, pas sur les lignes : `docker images`
+    // rend une ligne par étiquette, et plusieurs étiquettes désignent souvent une seule image.
+    // La boucle entière, et pas seulement ses lignes prises séparément : la déduplication
+    // apparaît aussi dans la boucle d'élagage, et une assertion par sous-chaîne resterait
+    // vraie alors même que le comptage aurait cessé de dédupliquer.
+    expect(s).toContain(
+      [
+        "for identifiant in $(docker images 'skynode/boutique' --format '{{.ID}}' 2>/dev/null); do",
+        '  case " $recents " in *" $identifiant "*) continue ;; esac',
+        '  recents="$recents $identifiant"',
+        "  vus=$((vus + 1))",
+        `  if [ "$vus" -ge ${IMAGES_CONSERVEES} ]; then break; fi`,
+        "done",
+      ].join("\n")
+    )
     expect(IMAGES_CONSERVEES).toBe(3)
+  })
+
+  /**
+   * Mesuré sur le banc : quatre passages dont seul le contexte de construction changeait ont
+   * produit une image finale identique, donc un seul identifiant sous quatre étiquettes à la
+   * même date. `docker images` ne pouvant plus les classer par date retombe sur l'ordre des
+   * étiquettes, et l'élagage a retiré celle que l'étape venait d'annoncer construite.
+   */
+  it("ne peut pas élaguer l'image de ce passage", () => {
+    expect(scriptImage()).toContain('if [ "$vieille" = "$image" ]; then continue; fi')
+  })
+
+  /**
+   * Le filtre de la boucle d'élagage, pris avec ses voisines : c'est lui, et lui seul, qui
+   * distingue une image à garder d'une image à retirer. Neutralisé, l'étape élaguerait tout
+   * sauf l'image du passage — et le retour arrière n'aurait plus rien vers quoi revenir.
+   */
+  it("n'élague que les images absentes des plus récentes", () => {
+    expect(scriptImage()).toContain(
+      [
+        '  if [ "$vieille" = "$image" ]; then continue; fi',
+        '  case " $recents " in *" $identifiant "*) continue ;; esac',
+      ].join("\n")
+    )
+  })
+
+  /** Deux étiquettes d'une même image ne font pas deux retours arrière : on compte les images. */
+  it("compte les identifiants d'image, pas les étiquettes", () => {
+    const s = scriptImage()
+
+    expect(s).toContain("--format '{{.ID}}'")
+    expect(s).toContain("--format '{{.ID}}|{{.Repository}}:{{.Tag}}'")
+    expect(s).toContain("identifiant=${couple%%|*}")
+    expect(s).toContain("vieille=${couple#*|}")
   })
 
   /** L'élagage ne sort jamais du dépôt de cette application. */
