@@ -4,7 +4,7 @@ import { z } from "zod"
 import type { SkyNodeApi } from "./api.js"
 import { SkyNodeError } from "./api.js"
 import { formatExecReport } from "./exec-render.js"
-import { executePlan } from "./executor.js"
+import { executePlan, type TransferFn } from "./executor.js"
 import { formatLogs, lireLogs } from "./ops-render.js"
 import { LIGNES_DEFAUT, LIGNES_MAX, bornerLignes, scriptLogs, scriptRollback } from "./ops.js"
 import { runRemote } from "./remote.js"
@@ -12,6 +12,7 @@ import { formatInstanceDetail, formatInstanceList } from "./format.js"
 import { composePlan } from "./plan-compose.js"
 import { formatPlan, formatRefusal, formatViolations } from "./plan-render.js"
 import { PlanFormatError, parsePlan } from "./plan-types.js"
+import { recipeFor } from "./step.js"
 import { validatePlan } from "./plan-validate.js"
 import { analyzeProject } from "./project-analyze.js"
 import { ScanError, scanProject } from "./project-scan.js"
@@ -86,7 +87,23 @@ async function guard(run: () => Promise<ToolResult>): Promise<ToolResult> {
   }
 }
 
-export function registerTools(server: McpServer, api: SkyNodeApi, ssh: SshRunner): void {
+/**
+ * Ce que l'appelant peut substituer. Une seule entrée aujourd'hui, et elle existe pour la
+ * même raison qu'`ExecOptions.transfer` : le transfert monte son propre tuyau `tar | ssh`
+ * plutôt que de passer par le `SshRunner`, et rien d'autre ne permet donc d'éprouver
+ * `apply_plan` de bout en bout sans ouvrir une vraie session vers un vrai hôte. `index.ts`
+ * ne la passe pas ; le défaut est le transfert réel.
+ */
+export interface ToolsOptions {
+  transfer?: TransferFn
+}
+
+export function registerTools(
+  server: McpServer,
+  api: SkyNodeApi,
+  ssh: SshRunner,
+  options: ToolsOptions = {}
+): void {
   server.registerTool(
     "list_servers",
     {
@@ -326,7 +343,10 @@ export function registerTools(server: McpServer, api: SkyNodeApi, ssh: SshRunner
           ssh,
           target,
           { projectRoot: project_path },
-          { dryRun: dry_run === true }
+          {
+            dryRun: dry_run === true,
+            ...(options.transfer === undefined ? {} : { transfer: options.transfer }),
+          }
         )
 
         // Un rapport en échec est une erreur pour le client MCP : l'agent doit le voir comme
@@ -418,8 +438,37 @@ export function registerTools(server: McpServer, api: SkyNodeApi, ssh: SshRunner
         const target = resolveSshTarget(instance)
 
         const resultat = await runRemote(ssh, target, scriptRollback(application))
+        if (resultat.outcome === "failed") return failure(resultat.detail)
 
-        return resultat.outcome === "failed" ? failure(resultat.detail) : text(resultat.detail)
+        // L'état de la machine est réenregistré, sinon il continuerait de nommer l'image
+        // d'avant le retour arrière — constaté au banc de bout en bout. `state.record`
+        // constate ce qui tourne : c'est exactement le geste qu'il faut ici, et le rejouer
+        // vaut mieux que réécrire un second producteur du même fichier.
+        //
+        // Son échec ne change rien au retour arrière, qui a bien eu lieu : le dire plutôt
+        // que de rendre une erreur ferait relancer un rollback déjà abouti.
+        const etat = await runRemote(
+          ssh,
+          target,
+          recipeFor("state.record").script(
+            { type: "state.record" },
+            {
+              application,
+              // `state.record` ne lit ni la racine du projet ni le répertoire de travail :
+              // il constate le conteneur et le fichier de site, rien d'autre. Les passer
+              // vides le dit, là où des valeurs inventées laisseraient croire le contraire.
+              projectRoot: "",
+              workDir: "",
+            }
+          )
+        )
+
+        return text(
+          etat.outcome === "failed"
+            ? `${resultat.detail}\n\nEn revanche, l’état de la machine n’a pas pu être remis à jour : ` +
+              `il continue de nommer la version d’avant. ${etat.detail}`
+            : resultat.detail
+        )
       })
   )
 }

@@ -1,6 +1,6 @@
 {
   "name": "@skynode/mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Serveur MCP SkyNode — pilotez vos serveurs depuis votre agent de code",
   "license": "MIT",
   "type": "module",

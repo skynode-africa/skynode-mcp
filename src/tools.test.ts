@@ -717,6 +717,67 @@ describe("rollback", () => {
     expect(texteDe(out)).toMatch(/version précédente/i)
   })
 
+  /**
+   * Constaté au banc de bout en bout : sans ce second passage, `state.json` continuait de
+   * nommer l'image d'avant le retour arrière. L'état est censé constater ce qui tourne.
+   */
+  it("réenregistre l'état de la machine après un retour arrière réussi", async () => {
+    const scripts: string[] = []
+    const run = vi.fn(async (_cible: unknown, script: string) => {
+      scripts.push(script as string)
+      return {
+        code: 0,
+        stdout: "step.outcome\tapplied\nstep.detail\tfait\nstep.end\t1\n",
+        stderr: "",
+      }
+    })
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, {
+      run,
+    } as unknown as SshRunner)
+
+    await tools.get("rollback")!({ server_id: instance.id, application: "boutique" } as never)
+
+    expect(scripts).toHaveLength(2)
+    expect(scripts[1]).toContain("/etc/skynode/state.d/boutique.json")
+  })
+
+  /** Un état non réécrit ne défait pas un retour arrière abouti : le dire, pas le nier. */
+  it("rend un succès quand l'état n'a pas pu être réécrit", async () => {
+    let appels = 0
+    const run = vi.fn(async () => {
+      appels += 1
+      return appels === 1
+        ? { code: 0, stdout: "step.outcome\tapplied\nstep.detail\tramenée\nstep.end\t1\n", stderr: "" }
+        : { code: 0, stdout: "step.outcome\tfailed\nstep.detail\tdisque plein\nstep.end\t1\n", stderr: "" }
+    })
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, {
+      run,
+    } as unknown as SshRunner)
+
+    const out = (await tools.get("rollback")!({
+      server_id: instance.id,
+      application: "boutique",
+    } as never)) as { isError?: boolean }
+
+    expect(out.isError).toBeUndefined()
+    expect(texteDe(out)).toMatch(/ramenée/)
+    expect(texteDe(out)).toMatch(/état de la machine n’a pas pu être remis à jour/)
+  })
+
+  /** Un rollback en échec ne réenregistre rien : il n'y a rien de neuf à constater. */
+  it("ne réenregistre pas l'état quand le retour arrière a échoué", async () => {
+    const run = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: "step.outcome\tfailed\nstep.detail\tpas de version précédente\nstep.end\t1\n",
+      stderr: "",
+    })
+    const tools = mount({ getInstance: vi.fn().mockResolvedValue(instance) }, { run })
+
+    await tools.get("rollback")!({ server_id: instance.id, application: "boutique" } as never)
+
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
   /** Un nom d'application hostile ne compose aucun script : rien n'atteint le serveur. */
   it("refuse un nom d'application hostile sans ouvrir de session", async () => {
     const run = vi.fn()
