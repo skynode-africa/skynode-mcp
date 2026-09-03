@@ -17,7 +17,7 @@ import type { Violation } from "./plan-validate.js"
  * Une ligne par étape, dans le vocabulaire du développeur — jamais le nom de type, que
  * les tests interdisent explicitement de laisser passer.
  */
-function renderStep(step: PlanStep): string {
+export function renderStep(step: PlanStep): string {
   switch (step.type) {
     case "host.prepare":
       return step.swap_mo > 0
