@@ -82,7 +82,7 @@ async function guard(run: () => Promise<ToolResult>): Promise<ToolResult> {
     // utilisateur, et polluerait le contexte de la conversation.
     return failure(
       "Erreur inattendue du serveur MCP SkyNode. Relancez la commande ; si elle échoue " +
-        "encore, signalez-le sur github.com/zampou-code/skynode-mcp/issues."
+        "encore, signalez-le sur github.com/skynode-africa/skynode-mcp/issues."
     )
   }
 }
@@ -287,7 +287,7 @@ export function registerTools(
           return failure(
             "Le plan composé n’a pas passé sa propre validation — c’est un défaut de " +
               "SkyNode, pas de votre projet. Signalez-le sur " +
-              "github.com/zampou-code/skynode-mcp/issues avec ce détail :\n" +
+              "github.com/skynode-africa/skynode-mcp/issues avec ce détail :\n" +
               formatViolations(validation.violations)
           )
         }

@@ -1,8 +1,19 @@
 {
-  "name": "@skynode/mcp",
+  "name": "@skynode-africa/mcp",
   "version": "0.4.0",
   "description": "Serveur MCP SkyNode — pilotez vos serveurs depuis votre agent de code",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "skynode",
+    "vps",
+    "deploiement",
+    "docker",
+    "caddy"
+  ],
   "license": "MIT",
+  "author": "SkyNode <tech@skynode.africa> (https://skynode.africa)",
+  "homepage": "https://github.com/skynode-africa/skynode-mcp#readme",
   "type": "module",
   "bin": { "skynode-mcp": "./dist/index.js" },
   "main": "./dist/index.js",
@@ -11,7 +22,13 @@
   "packageManager": "pnpm@11.17.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zampou-code/skynode-mcp.git"
+    "url": "git+https://github.com/skynode-africa/skynode-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/skynode-africa/skynode-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/index.js",

@@ -158,6 +158,26 @@ describe("registerTools", () => {
     })
   })
 
+  /**
+   * Deux messages rendus à l'utilisateur portent l'adresse du dépôt en clair : celui d'un
+   * bogue inattendu, et celui d'un plan que le composeur produit mais que son propre
+   * validateur refuse. Rien ne les épinglait — c'est ainsi qu'ils ont pu désigner l'ancien
+   * propriétaire du dépôt bien après son changement de main. Un lien mort dans un message
+   * d'erreur envoie le client nulle part au moment précis où il cherche de l'aide.
+   */
+  it("renvoie vers le dépôt de l'organisation, jamais vers un compte personnel", async () => {
+    const tools = mount({
+      listInstances: async () => {
+        throw new Error("panne inattendue")
+      },
+    })
+
+    const texte = texteDe(await tools.get("list_servers")!({} as never))
+
+    expect(texte).toContain("github.com/skynode-africa/skynode-mcp/issues")
+    expect(texte).not.toContain("zampou-code")
+  })
+
   it("enregistre les huit outils", () => {
     const tools = mount({})
 

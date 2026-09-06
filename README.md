@@ -1,4 +1,4 @@
-# @skynode/mcp
+# @skynode-africa/mcp
 
 Serveur MCP qui donne à votre agent de code — Claude Code, Cursor, Codex — la visibilité
 sur vos serveurs [SkyNode](https://skynode.africa).
@@ -19,7 +19,7 @@ valeur n'est affichée qu'une seule fois.
 ### Claude Code
 
 ```bash
-claude mcp add skynode --env SKYNODE_TOKEN=sky_votre_jeton -- npx -y @skynode/mcp
+claude mcp add skynode --env SKYNODE_TOKEN=sky_votre_jeton -- npx -y @skynode-africa/mcp
 ```
 
 ### Cursor, Windsurf, Codex
@@ -31,7 +31,7 @@ Dans la configuration MCP de votre client :
   "mcpServers": {
     "skynode": {
       "command": "npx",
-      "args": ["-y", "@skynode/mcp"],
+      "args": ["-y", "@skynode-africa/mcp"],
       "env": { "SKYNODE_TOKEN": "sky_votre_jeton" }
     }
   }
