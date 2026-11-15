@@ -19,7 +19,7 @@ export const STATUS_LABELS: Record<string, string> = {
   STOPPED: "arrêté",
   SUSPENDED: "suspendu pour impayé — un paiement le remet en service",
   CANCELLED: "résiliation demandée — il fonctionne jusqu'à son échéance",
-  TERMINATED: "résilié — il n'est plus accessible",
+  TERMINATED: "résilié — le serveur et toutes ses données ont été définitivement supprimés, sans récupération possible",
 }
 
 /** Le hostname est facultatif à la commande : sans repli, la ligne dirait « null ». */
